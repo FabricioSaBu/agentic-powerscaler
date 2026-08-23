@@ -1,0 +1,32 @@
+# Fly.io app configuration for Agentic PowerScaler.
+# App names must be globally unique on Fly -- change `app` below if it's taken.
+# Region can be changed to whichever is closest to you (see `fly platform regions`).
+app = "agentic-powerscaler"
+primary_region = "iad"
+
+[build]
+
+[env]
+PORT = "8000"
+ENVIRONMENT = "production"
+# SQLite lives on the mounted volume (see [mounts] below) so it survives deploys/restarts.
+# Note the 4 slashes: sqlite+aiosqlite:// + absolute path /data/powerscaler.db
+DATABASE_URL = "sqlite+aiosqlite:////data/powerscaler.db"
+
+# Real secrets (GEMINI_API_KEY, PARALLEL_API_KEY, LANGSMITH_API_KEY) are NOT set here.
+# Set them with: fly secrets set GEMINI_API_KEY=... PARALLEL_API_KEY=... LANGSMITH_API_KEY=...
+
+[mounts]
+source = "powerscaler_data"
+destination = "/data"
+
+[http_service]
+internal_port = 8000
+force_https = true
+auto_stop_machines = "stop"
+auto_start_machines = true
+min_machines_running = 0
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "256mb"

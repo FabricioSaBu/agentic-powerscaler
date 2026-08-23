@@ -1,0 +1,32 @@
+# Python virtualenv & cache
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment variables
+.env
+.env.local
+
+# IDE / Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code local tool settings (no secrets, just permission config)
+.claude/
+
+# Project logs & outputs
+*.log
+output/
+artifacts/
+
+# SQLite database files
+*.db
+*.sqlite3
