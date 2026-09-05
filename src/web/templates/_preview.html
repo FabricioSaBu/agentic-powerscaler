@@ -1,0 +1,133 @@
+{% if error %}
+<div class="result-toolbar">
+  <button type="button" class="new-matchup" onclick="resetMatchup()">&#8635; New Matchup</button>
+</div>
+<div class="error-banner">
+  <strong>Couldn't identify these contenders:</strong> {{ error }}
+</div>
+{% else %}
+<form id="confirm-form" hx-post="/evaluate" hx-target="#result" hx-swap="innerHTML"
+      hx-indicator="#loading" hx-disabled-elt="#confirm-btn">
+  <input type="hidden" name="roster_json" value="{{ roster_json }}">
+  <input type="hidden" name="resolution_json" value="{{ resolution_json }}">
+  <input type="hidden" name="battle_environment" value="{{ battle_environment }}">
+  {% if include_cinematic_script %}
+  <input type="hidden" name="include_cinematic_script" value="true">
+  {% endif %}
+
+  <div class="preview-header">
+    <h3>Confirm which versions to use</h3>
+    <p>These are the versions we'll research. Change any of them before continuing.</p>
+  </div>
+
+  <div class="stats-grid">
+    {% for side, team, specs in [('a', resolution.team_a, team_a_specs), ('b', resolution.team_b, team_b_specs)] %}
+    <div class="team-col">
+      {% if team | length > 1 or (resolution.team_a | length > 1 or resolution.team_b | length > 1) %}
+      <div class="team-header team-header-{{ side }}">Team {{ 'A' if side == 'a' else 'B' }}</div>
+      {% endif %}
+      {% for member in team %}
+      {% set i = loop.index0 %}
+      {% set spec = specs[i] %}
+      <div class="stat-card {{ side }}">
+        <h3>{{ member.canonical_name or member.input_name }}</h3>
+        <div class="franchise-line">{{ member.franchise }}</div>
+        {% for handicap in spec.handicaps %}
+        <div class="handicap-note">🚫 Handicap: {{ handicap }}</div>
+        {% endfor %}
+
+        <label class="version-label" for="version_{{ side }}_{{ i }}">Version</label>
+        <select class="version-select js-version" id="version_{{ side }}_{{ i }}"
+                name="version_{{ side }}_{{ i }}" data-key="{{ side }}_{{ i }}"
+                onchange="updateStatusBadge('{{ side }}_{{ i }}')">
+          {% for opt in member.options %}
+          <option value="{{ loop.index0 }}"
+                  data-status="{{ opt.power_status }}"
+                  data-note="{{ opt.status_note }}"
+                  data-summary="{{ opt.summary }}"
+                  {% if opt.is_recommended %}selected{% endif %}>
+            {{ opt.series_label or opt.version_era }} &mdash; {{ opt.form_name }}
+          </option>
+          {% endfor %}
+        </select>
+
+        <div class="status-block" id="status_{{ side }}_{{ i }}"></div>
+
+        <div class="refine-row version-refine">
+          <input type="text" id="version_refine_{{ side }}_{{ i }}"
+                 value="{{ spec.version_hint or '' }}"
+                 class="handicap-input" placeholder="Version not listed? Describe it, e.g. GT era">
+          <button type="button" class="refine-btn" data-kind="version"
+                  data-side="{{ side }}" data-i="{{ i }}"
+                  hx-post="/preview" hx-include="closest form"
+                  hx-target="#result" hx-swap="innerHTML" hx-indicator="#loading">&#8635; Refine</button>
+        </div>
+
+        {% for item in member.items %}
+        {% set j = loop.index0 %}
+        <div class="item-block">
+          <label class="version-label" for="item_{{ side }}_{{ i }}_{{ j }}">Item &mdash; &ldquo;{{ item.query }}&rdquo;</label>
+          {% if item.candidates %}
+          <select class="version-select" id="item_{{ side }}_{{ i }}_{{ j }}" name="item_{{ side }}_{{ i }}_{{ j }}">
+            {% for opt in item.candidates %}
+            <option value="{{ loop.index0 }}" {% if opt.is_recommended %}selected{% endif %}>
+              {{ opt.name }} ({{ opt.origin_universe }}) &mdash; {{ opt.category }}
+            </option>
+            {% endfor %}
+          </select>
+          {% if item.ambiguous and item.clarifying_question %}
+          <div class="status-note">❓ {{ item.clarifying_question }}</div>
+          {% endif %}
+          {% for opt in item.candidates %}
+          {% if opt.is_recommended and opt.description %}
+          <div class="status-note">{{ opt.description }}</div>
+          {% endif %}
+          {% endfor %}
+          {% else %}
+          <div class="status-note">Couldn't identify an item from &ldquo;{{ item.query }}&rdquo;.</div>
+          {% endif %}
+
+          <div class="refine-row">
+            <input type="text" id="item_refine_{{ side }}_{{ i }}_{{ j }}" value="{{ item.query }}"
+                   class="handicap-input" placeholder="Not quite? Add a detail and refine">
+            <button type="button" class="refine-btn" data-kind="item"
+                    data-side="{{ side }}" data-i="{{ i }}" data-j="{{ j }}"
+                    hx-post="/preview" hx-include="closest form"
+                    hx-target="#result" hx-swap="innerHTML" hx-indicator="#loading">&#8635; Refine</button>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="preview-actions">
+    <button type="button" class="new-matchup" onclick="resetMatchup()">Cancel</button>
+    <button type="submit" id="confirm-btn" class="submit">Continue &rarr; Evaluate Matchup</button>
+  </div>
+</form>
+
+<script>
+  // Reflect the selected option's completeness into a badge + note, for every member card.
+  function updateStatusBadge(key) {
+    const select = document.getElementById('version_' + key);
+    const opt = select.options[select.selectedIndex];
+    const status = (opt.dataset.status || 'unknown').toLowerCase();
+    const labels = {
+      complete: ['badge-complete', '✅ Power complete'],
+      ongoing:  ['badge-ongoing',  '\u{1F504} Still developing'],
+      unknown:  ['badge-unknown',  '❓ Status unknown']
+    };
+    const [cls, text] = labels[status] || labels.unknown;
+    const parts = [`<span class="status-badge ${cls}">${text}</span>`];
+    if (opt.dataset.note) parts.push(`<div class="status-note">${opt.dataset.note}</div>`);
+    if (opt.dataset.summary) parts.push(`<div class="status-note">${opt.dataset.summary}</div>`);
+    document.getElementById('status_' + key).innerHTML = parts.join('');
+  }
+  document.querySelectorAll('#confirm-form .js-version').forEach(function (select) {
+    updateStatusBadge(select.dataset.key);
+  });
+</script>
+{% endif %}

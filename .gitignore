@@ -27,6 +27,10 @@ htmlcov/
 output/
 artifacts/
 
-# SQLite database files
+# SQLite database files (and any suffixed backup, e.g. powerscaler.db.bak-preclean --
+# a bare *.bak would not match those, since they don't end in .bak)
 *.db
+*.db.*
 *.sqlite3
+*.bak
+*.bak-*

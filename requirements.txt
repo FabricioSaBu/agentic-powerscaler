@@ -18,6 +18,7 @@ httptools==0.8.0
 httpx==0.28.1
 idna==3.18
 iniconfig==2.3.0
+Jinja2==3.1.6
 jsonpatch==1.33
 jsonpointer==3.1.1
 langchain-core==1.6.0
@@ -27,6 +28,8 @@ langgraph-checkpoint==4.2.0
 langgraph-prebuilt==1.1.0
 langgraph-sdk==0.4.3
 langsmith==0.11.1
+Markdown==3.10.3
+MarkupSafe==3.0.3
 orjson==3.12.0
 ormsgpack==1.12.2
 packaging==26.3
@@ -41,6 +44,7 @@ Pygments==2.20.0
 pytest==9.1.1
 pytest-asyncio==1.4.0
 python-dotenv==1.2.2
+python-multipart==0.0.32
 PyYAML==6.0.3
 requests==2.34.2
 requests-toolbelt==1.0.0

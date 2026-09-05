@@ -27,7 +27,12 @@ class ParallelSearchResponse(BaseModel):
 
 class ParallelExtractRequest(BaseModel):
     urls: List[str]
-    format: str = Field(default="markdown", description="markdown or text")
+    # The API rejects unknown body fields outright (422 extra_forbidden), so only send what
+    # it accepts. `objective` focuses extraction on the version we actually care about --
+    # without it, a general "Vegeta" page yields whichever era the page emphasises.
+    objective: Optional[str] = Field(
+        default=None, description="What the extraction should focus on, e.g. the version's feats"
+    )
 
 
 class ParallelExtractResultItem(BaseModel):

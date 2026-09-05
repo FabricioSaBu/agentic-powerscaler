@@ -4,11 +4,14 @@ Run with: uvicorn src.main:app --reload
 """
 
 import sys
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from src.core.config import settings
 from src.core.logging import logger
 from src.api.router import api_router
+from src.web.router import router as web_router
 from src.db.base import init_db
 
 app = FastAPI(
@@ -31,7 +34,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "web" / "static")), name="static")
 app.include_router(api_router)
+app.include_router(web_router)
 
 
 @app.on_event("startup")

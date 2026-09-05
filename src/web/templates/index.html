@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agentic PowerScaler</title>
+  <script>
+    // Apply the saved theme before first paint so there's no flash of the wrong theme.
+    (function () {
+      try {
+        var t = localStorage.getItem('ps-theme');
+        if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+      } catch (e) { /* storage unavailable: stay on the dark default */ }
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css?v={{ static_version }}">
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+</head>
+<body>
+  <button type="button" class="theme-toggle" onclick="toggleTheme(event)" aria-label="Toggle light/dark theme">
+    <span class="to-light">&#9728;&#65039;</span>
+    <span class="to-dark">&#127769;</span>
+  </button>
+
+  <div class="wrap">
+    <header class="hero">
+      <h1>⚔ Agentic PowerScaler</h1>
+      <p>Autonomous battle evaluator &amp; cinematic screenplay engine, powered by Gemini + Parallel</p>
+    </header>
+
+    <form id="matchup-form" class="card" hx-post="/preview" hx-target="#result" hx-swap="innerHTML" hx-indicator="#loading" hx-disabled-elt="#submit-btn">
+      <div class="vs-row">
+        <div class="duelist duelist-a">
+          <div class="team-header">Team A</div>
+          <div class="members" id="members_a"></div>
+          <button type="button" class="add-btn add-member" id="add_member_a" onclick="addMember('a')">+ Add contender</button>
+        </div>
+        <div class="vs-badge">VS</div>
+        <div class="duelist duelist-b">
+          <div class="team-header">Team B</div>
+          <div class="members" id="members_b"></div>
+          <button type="button" class="add-btn add-member" id="add_member_b" onclick="addMember('b')">+ Add contender</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="battle_environment">Battle Environment (optional)</label>
+        <input type="text" id="battle_environment" name="battle_environment" placeholder="Neutral Multiversal Arena">
+      </div>
+
+      <button type="submit" id="submit-btn" class="submit">Evaluate Matchup</button>
+      <p class="step-hint">You'll confirm which character versions to use before the research runs. Battle scripts are written afterwards, per scenario.</p>
+    </form>
+
+    <div id="loading" class="htmx-indicator">
+      <div class="hud">
+        <div class="hud-bar"><div class="hud-bar-fill"></div></div>
+        <ul id="agent-steps" class="hud-steps"></ul>
+      </div>
+    </div>
+
+    <div id="result"></div>
+
+    <footer>Agentic Cinema Hackathon &middot; Parallel API Partner Track</footer>
+  </div>
+
+  <!-- Scenario script modal: lives in the persistent page (not the swapped result fragment)
+       so htmx wires its Generate button exactly once. -->
+  <div id="script-modal" class="modal-overlay" hidden onclick="if (event.target === this) closeScriptModal()">
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="script-modal-title">
+      <h3 id="script-modal-title">🎬 Write this scenario?</h3>
+      <p class="modal-body">
+        Generate a cinematic battle script for the outcome where
+        <strong id="script-modal-scenario">…</strong>.
+      </p>
+      <form id="script-form">
+        <input type="hidden" name="report_id" id="script-report-id">
+        <input type="hidden" name="scenario" id="script-scenario">
+        <div class="modal-actions">
+          <button type="button" class="new-matchup" onclick="closeScriptModal()">Cancel</button>
+          <button type="button" class="submit" id="script-generate-btn"
+                  hx-post="/script" hx-include="#script-form"
+                  hx-target="#script-area" hx-swap="innerHTML" hx-indicator="#loading">Generate script</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Cloned for each roster member; all inputs are display-only (no name= attributes) --
+       on submit the whole roster is serialized into a single roster_json parameter. -->
+  <template id="member-template">
+    <div class="member">
+      <div class="member-head">
+        <span class="member-title">Contender</span>
+        <button type="button" class="row-remove member-remove" onclick="removeMember(this)" title="Remove contender">&#10005;</button>
+      </div>
+      <input type="text" class="member-name" placeholder="Character name, e.g. Goku" required>
+      <div class="sub-section" data-kind="handicap">
+        <div class="sub-head">
+          <span class="sub-label">Handicaps</span>
+          <button type="button" class="add-btn" onclick="addRow(this)">+ Add</button>
+        </div>
+        <div class="rows"></div>
+      </div>
+      <div class="sub-section" data-kind="item">
+        <div class="sub-head">
+          <span class="sub-label">Items</span>
+          <button type="button" class="add-btn" onclick="addRow(this)">+ Add</button>
+        </div>
+        <div class="rows"></div>
+      </div>
+    </div>
+  </template>
+
+  <script>
+    // ---------- Theme toggle (expanding wave via the View Transitions API) ----------
+    function toggleTheme(event) {
+      var next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+      var apply = function () {
+        document.documentElement.dataset.theme = next;
+        try { localStorage.setItem('ps-theme', next); } catch (e) { /* ignore */ }
+      };
+      if (!document.startViewTransition) { apply(); return; }
+
+      var x = event.clientX || window.innerWidth - 37;
+      var y = event.clientY || 37;
+      var radius = Math.hypot(Math.max(x, window.innerWidth - x), Math.max(y, window.innerHeight - y));
+      document.startViewTransition(apply).ready.then(function () {
+        document.documentElement.animate(
+          { clipPath: ['circle(0px at ' + x + 'px ' + y + 'px)', 'circle(' + radius + 'px at ' + x + 'px ' + y + 'px)'] },
+          { duration: 550, easing: 'ease-in-out', pseudoElement: '::view-transition-new(root)' }
+        );
+      });
+    }
+
+    // ---------- Scenario script modal ----------
+    function openScriptModal(scenario, label, reportId) {
+      document.getElementById('script-scenario').value = scenario;
+      document.getElementById('script-report-id').value = reportId;
+      document.getElementById('script-modal-scenario').textContent = label;
+      document.getElementById('script-modal').hidden = false;
+    }
+
+    function closeScriptModal() {
+      document.getElementById('script-modal').hidden = true;
+    }
+
+    document.addEventListener('keydown', function (evt) {
+      if (evt.key === 'Escape') closeScriptModal();
+    });
+
+    // ---------- Roster builder ----------
+    var MAX_TEAM_SIZE = 3;
+    var ROW_PLACEHOLDERS = {
+      handicap: 'e.g. no Instant Transmission',
+      item: 'e.g. Mjolnir'
+    };
+
+    function addMember(side) {
+      var container = document.getElementById('members_' + side);
+      if (container.children.length >= MAX_TEAM_SIZE) return;
+      var block = document.getElementById('member-template').content.firstElementChild.cloneNode(true);
+      container.appendChild(block);
+      renumber(side);
+      return block;
+    }
+
+    function removeMember(btn) {
+      var member = btn.closest('.member');
+      var container = member.parentElement;
+      if (container.children.length <= 1) return;   // each side keeps at least one
+      member.remove();
+      renumber(container.id === 'members_a' ? 'a' : 'b');
+    }
+
+    function renumber(side) {
+      var container = document.getElementById('members_' + side);
+      var members = Array.prototype.slice.call(container.children);
+      members.forEach(function (member, index) {
+        member.querySelector('.member-title').textContent =
+          members.length > 1 ? 'Contender ' + (index + 1) : 'Contender';
+        member.querySelector('.member-remove').style.display = members.length > 1 ? '' : 'none';
+      });
+      document.getElementById('add_member_' + side).style.display =
+        members.length >= MAX_TEAM_SIZE ? 'none' : '';
+    }
+
+    function addRow(btn) {
+      var section = btn.closest('.sub-section');
+      var row = document.createElement('div');
+      row.className = 'input-row';
+      var input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'handicap-input row-input';
+      input.placeholder = ROW_PLACEHOLDERS[section.dataset.kind] || '';
+      var remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'row-remove';
+      remove.innerHTML = '&#10005;';
+      remove.onclick = function () { row.remove(); };
+      row.appendChild(input);
+      row.appendChild(remove);
+      section.querySelector('.rows').appendChild(row);
+      input.focus();
+      return input;
+    }
+
+    function collectRoster() {
+      function collectTeam(side) {
+        return Array.prototype.slice.call(document.getElementById('members_' + side).children)
+          .map(function (member) {
+            function rows(kind) {
+              return Array.prototype.slice.call(
+                member.querySelectorAll('.sub-section[data-kind="' + kind + '"] .row-input')
+              ).map(function (i) { return i.value.trim(); }).filter(Boolean);
+            }
+            return {
+              name: member.querySelector('.member-name').value.trim(),
+              handicaps: rows('handicap'),
+              item_queries: rows('item')
+            };
+          })
+          .filter(function (m) { return m.name; });
+      }
+      return { team_a: collectTeam('a'), team_b: collectTeam('b') };
+    }
+
+    // Serialize the roster into the /preview request from the main form.
+    document.getElementById('matchup-form').addEventListener('htmx:configRequest', function (evt) {
+      evt.detail.parameters['roster_json'] = JSON.stringify(collectRoster());
+    });
+
+    // Refine buttons in the preview fragment: before their /preview re-post fires, splice
+    // the refined item query or version hint into the roster_json the confirm form carries.
+    document.body.addEventListener('htmx:configRequest', function (evt) {
+      var btn = evt.detail.elt;
+      if (!btn.classList || !btn.classList.contains('refine-btn')) return;
+      try {
+        var roster = JSON.parse(evt.detail.parameters['roster_json']);
+        var member = roster['team_' + btn.dataset.side][Number(btn.dataset.i)];
+        if (btn.dataset.kind === 'version') {
+          var vInput = document.getElementById('version_refine_' + btn.dataset.side + '_' + btn.dataset.i);
+          // An emptied box clears the hint, so a plain re-resolve is possible too.
+          member.version_hint = (vInput.value || '').trim() || null;
+        } else {
+          var iInput = document.getElementById(
+            'item_refine_' + btn.dataset.side + '_' + btn.dataset.i + '_' + btn.dataset.j
+          );
+          var value = (iInput.value || '').trim();
+          if (value) member.item_queries[Number(btn.dataset.j)] = value;
+        }
+        evt.detail.parameters['roster_json'] = JSON.stringify(roster);
+      } catch (e) { /* leave the original roster untouched */ }
+    });
+
+    // ---------- New Matchup reset (called from result/preview panels) ----------
+    function resetMatchup() {
+      document.getElementById('result').innerHTML = '';
+      ['a', 'b'].forEach(function (side) {
+        document.getElementById('members_' + side).innerHTML = '';
+        addMember(side);
+      });
+      document.getElementById('battle_environment').value = '';
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      document.querySelector('#members_a .member-name').focus();
+    }
+
+    // Initial roster: one member per side.
+    addMember('a');
+    addMember('b');
+
+    // ---------- Agentic loading HUD ----------
+    // One HTMX POST covers the whole pipeline, so the ticker paces itself on typical stage
+    // timings rather than real progress events -- the last step holds until the response lands.
+    var PREVIEW_STEPS = [
+      'Resolving canonical identities…',
+      'Scanning continuities, eras & forms…',
+      'Cross-checking stored profiles & item catalog…',
+      'Preparing version options…'
+    ];
+    var EVAL_STEPS = [
+      'Locking in confirmed versions & equipment…',
+      'Scouting feats via Parallel Search…',
+      'Extracting structured traits & power profiles…',
+      'Parsing cosmology & dimensional tiering…',
+      'Evaluating hax interactions & resistances…',
+      'Generating final verdict & battle screenplay…'
+    ];
+    var SCRIPT_STEPS = [
+      'Setting the stage…',
+      'Choreographing the clash…',
+      'Directing shots, VFX & dialogue…'
+    ];
+    var stepTimer = null;
+
+    function startTicker(steps, interval) {
+      stopTicker();
+      var list = document.getElementById('agent-steps');
+      list.innerHTML = '';
+      steps.forEach(function (label) {
+        var li = document.createElement('li');
+        var tick = document.createElement('span');
+        tick.className = 'tick';
+        var text = document.createElement('span');
+        text.textContent = label;
+        li.appendChild(tick);
+        li.appendChild(text);
+        list.appendChild(li);
+      });
+      var items = Array.prototype.slice.call(list.children);
+      var current = 0;
+      function paint() {
+        items.forEach(function (li, idx) {
+          li.className = idx < current ? 'done' : (idx === current ? 'active' : '');
+          li.querySelector('.tick').textContent = idx < current ? '✓' : (idx === current ? '⟳' : '○');
+        });
+      }
+      paint();
+      stepTimer = setInterval(function () {
+        if (current < steps.length - 1) { current++; paint(); }
+      }, interval);
+    }
+
+    function stopTicker() {
+      if (stepTimer) { clearInterval(stepTimer); stepTimer = null; }
+    }
+
+    document.body.addEventListener('htmx:beforeRequest', function (evt) {
+      var path = (evt.detail.requestConfig && evt.detail.requestConfig.path) || '';
+      if (path === '/evaluate') startTicker(EVAL_STEPS, 10000);
+      else if (path === '/preview') startTicker(PREVIEW_STEPS, 2600);
+      else if (path === '/script') { closeScriptModal(); startTicker(SCRIPT_STEPS, 6000); }
+    });
+    document.body.addEventListener('htmx:afterRequest', stopTicker);
+
+    // ---------- Analysis accordion ----------
+    // The verdict arrives as one long markdown-rendered block; split it into collapsible
+    // sections on its h4 headers (falling back to h3), keeping any preamble above the fold.
+    function buildVerdictAccordion() {
+      var src = document.querySelector('.verdict-text');
+      if (!src || src.dataset.accordionized) return;
+
+      var level = src.querySelectorAll(':scope > h4').length >= 2 ? 'H4'
+                : src.querySelectorAll(':scope > h3').length >= 2 ? 'H3'
+                : null;
+      if (!level) return;
+
+      var preamble = [];
+      var sections = [];
+      var current = null;
+      Array.prototype.slice.call(src.childNodes).forEach(function (node) {
+        if (node.nodeType === 1 && node.tagName === level) {
+          current = { title: node.textContent.trim(), nodes: [] };
+          sections.push(current);
+        } else if (current) {
+          current.nodes.push(node);
+        } else {
+          preamble.push(node);
+        }
+      });
+      if (sections.length < 2) return;
+
+      src.innerHTML = '';
+      preamble.forEach(function (node) { src.appendChild(node); });
+      var wrap = document.createElement('div');
+      wrap.className = 'accordion';
+      sections.forEach(function (section, idx) {
+        var details = document.createElement('details');
+        details.className = 'acc-item';
+        if (idx === 0) details.open = true;
+        var summary = document.createElement('summary');
+        summary.textContent = section.title;
+        var body = document.createElement('div');
+        body.className = 'acc-body';
+        section.nodes.forEach(function (node) { body.appendChild(node); });
+        details.appendChild(summary);
+        details.appendChild(body);
+        wrap.appendChild(details);
+      });
+      src.appendChild(wrap);
+      src.dataset.accordionized = 'true';
+    }
+
+    document.body.addEventListener('htmx:afterSwap', function (evt) {
+      buildVerdictAccordion();
+      if (evt.target && evt.target.id === 'script-area') {
+        evt.target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    });
+  </script>
+</body>
+</html>

@@ -5,13 +5,32 @@ Integrates with official google-genai SDK.
 
 from typing import Optional, Dict, Any, Type, TypeVar
 from google import genai
+from google.genai import errors as genai_errors
 from langsmith.wrappers import wrap_gemini
 from pydantic import BaseModel
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 from src.core.config import settings
 from src.core.logging import logger
 from src.core.exceptions import GeminiLLMError
 
 T = TypeVar("T", bound=BaseModel)
+
+# 503 UNAVAILABLE ("high demand") and 429 rate limits are explicitly temporary, and a single
+# one otherwise fails a whole matchup run. Retried with backoff; 4xx (bad key, bad request)
+# is not retried, since repeating it would never help.
+_RETRYABLE_CODES = {429, 500, 502, 503, 504}
+
+
+def _is_transient(exc: BaseException) -> bool:
+    return isinstance(exc, genai_errors.APIError) and getattr(exc, "code", None) in _RETRYABLE_CODES
+
+
+_retry_transient = retry(
+    retry=retry_if_exception(_is_transient),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=2, min=2, max=16),
+    reraise=True,
+)
 
 
 class GeminiService:
@@ -44,11 +63,15 @@ class GeminiService:
             if system_instruction:
                 config["system_instruction"] = system_instruction
 
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=config if config else None
-            )
+            @_retry_transient
+            def _call():
+                return self.client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=config if config else None
+                )
+
+            response = _call()
             return response.text or ""
         except Exception as e:
             logger.error(f"Gemini API error: {e}")
@@ -69,11 +92,15 @@ class GeminiService:
             if system_instruction:
                 config["system_instruction"] = system_instruction
 
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=config,
-            )
+            @_retry_transient
+            def _call():
+                return self.client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=config,
+                )
+
+            response = _call()
             if response.parsed is not None:
                 return response.parsed
             return response_schema.model_validate_json(response.text)

@@ -17,12 +17,55 @@ class Base(DeclarativeBase):
     pass
 
 
+# create_all only creates missing TABLES -- it never alters existing ones. Columns added to
+# a table after a DB already exists must be listed here so _migrate() can ALTER them in
+# (SQLite supports ADD COLUMN), preserving already-researched character data instead of
+# forcing a DB reset. Swap for Alembic if the schema outgrows this.
+_COLUMN_MIGRATIONS = {
+    "verdicts": [
+        ("win_probability_a", "INTEGER"),
+        ("win_probability_b", "INTEGER"),
+        ("tie_probability", "INTEGER"),
+    ],
+}
+
+
+# SQLite cannot alter an inline UNIQUE constraint, so tables whose *constraints* changed are
+# dropped and recreated by create_all instead. Only safe for derived data that can be
+# regenerated on demand -- never for researched characters or matchup history.
+# {table: sentinel column whose absence means "old shape, rebuild"}
+_TABLE_REBUILDS = {
+    "cinematic_scenes": "scenario",
+}
+
+
+def _migrate(conn) -> None:
+    from sqlalchemy import text
+
+    def columns_of(table: str) -> set:
+        return {row[1] for row in conn.execute(text(f'PRAGMA table_info("{table}")'))}
+
+    for table, columns in _COLUMN_MIGRATIONS.items():
+        existing = columns_of(table)
+        if not existing:
+            continue  # table doesn't exist yet; create_all just made it with all columns
+        for name, ddl_type in columns:
+            if name not in existing:
+                conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN {name} {ddl_type}'))
+
+    for table, sentinel in _TABLE_REBUILDS.items():
+        existing = columns_of(table)
+        if existing and sentinel not in existing:
+            conn.execute(text(f'DROP TABLE "{table}"'))
+
+
 async def init_db() -> None:
-    """Creates all tables and seeds reference/taxonomy data. Swap create_all for Alembic if the schema outgrows this."""
+    """Creates all tables, applies additive column migrations, and seeds reference data."""
     from src.db import models  # noqa: F401  (import registers ORM classes onto Base.metadata)
     from src.db.seed import seed_catalog
 
     async with engine.begin() as conn:
+        await conn.run_sync(_migrate)
         await conn.run_sync(Base.metadata.create_all)
 
     async with AsyncSessionLocal() as session:

@@ -1,0 +1,141 @@
+<div class="result-toolbar">
+  <button type="button" class="new-matchup" onclick="resetMatchup()">&#8635; New Matchup</button>
+</div>
+
+{% if error %}
+<div class="error-banner">
+  <strong>The pipeline hit a snag:</strong> {{ error }}
+</div>
+{% else %}
+<div class="winner-banner">
+  <div class="trophy">🏆</div>
+  <h2>{{ verdict.winner }} wins</h2>
+  <span class="diff-tier">{{ verdict.diff_tier }}</span>
+
+  {% if verdict.win_probability_a + verdict.win_probability_b + verdict.tie_probability > 0 %}
+  {% set label_a = verdict.team_a_stats | map(attribute='name') | join(' & ') %}
+  {% set label_b = verdict.team_b_stats | map(attribute='name') | join(' & ') %}
+  <div class="prob-wrap">
+    <div class="prob-bar">
+      <div class="prob-a" style="width: {{ verdict.win_probability_a }}%"
+           title="Write the scenario where {{ label_a }} wins"
+           onclick="openScriptModal('a_wins', '{{ label_a }} wins', '{{ report.report_id }}')"></div>
+      <div class="prob-tie" style="width: {{ verdict.tie_probability }}%"
+           title="Write the draw scenario"
+           onclick="openScriptModal('tie', 'neither side wins', '{{ report.report_id }}')"></div>
+      <div class="prob-b" style="width: {{ verdict.win_probability_b }}%"
+           title="Write the scenario where {{ label_b }} wins"
+           onclick="openScriptModal('b_wins', '{{ label_b }} wins', '{{ report.report_id }}')"></div>
+    </div>
+    <div class="prob-legend">
+      <span class="pl pl-a" onclick="openScriptModal('a_wins', '{{ label_a }} wins', '{{ report.report_id }}')"><i></i>{{ label_a }} {{ verdict.win_probability_a }}%</span>
+      <span class="pl pl-tie" onclick="openScriptModal('tie', 'neither side wins', '{{ report.report_id }}')"><i></i>Tie {{ verdict.tie_probability }}%</span>
+      <span class="pl pl-b" onclick="openScriptModal('b_wins', '{{ label_b }} wins', '{{ report.report_id }}')"><i></i>{{ label_b }} {{ verdict.win_probability_b }}%</span>
+    </div>
+    <p class="prob-hint">🎬 Click any outcome to script that scenario &mdash; including the ones that didn't happen.</p>
+  </div>
+  {% endif %}
+
+  {% if verdict.winning_factors %}
+  <div class="factors">
+    {% for factor in verdict.winning_factors %}
+    <span>{{ factor }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+<div class="stats-grid">
+  {% for side, team_stats in [('a', verdict.team_a_stats), ('b', verdict.team_b_stats)] %}
+  <div class="team-col">
+    {% if is_team_battle %}
+    <div class="team-header team-header-{{ side }}">Team {{ 'A' if side == 'a' else 'B' }}</div>
+    {% endif %}
+    {% for stats in team_stats %}
+    <div class="stat-card {{ side }}">
+      <h3>{{ stats.name }}</h3>
+      <div class="stat-row"><span class="k">Speed</span><span class="v">{{ stats.speed }}</span></div>
+      <div class="stat-row"><span class="k">Power Tier</span><span class="v">{{ stats.power_tier }}</span></div>
+      <div class="stat-row"><span class="k">Strength</span><span class="v">{{ stats.strength }}</span></div>
+      <div class="stat-row"><span class="k">Durability</span><span class="v">{{ stats.durability }}</span></div>
+      {% if stats.hax_abilities %}
+      <div class="tag-list">
+        {% for hax in stats.hax_abilities %}<span>{{ hax }}</span>{% endfor %}
+      </div>
+      {% endif %}
+      {% if stats.key_feats %}
+      <ul class="feat-list">
+        {% for feat in stats.key_feats %}
+        <li><strong>{{ feat.title }}</strong> &mdash; {{ feat.description }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+
+      {% if stats.trail %}
+      <details class="trail">
+        <summary>🔍 Research trail</summary>
+        <div class="trail-body">
+          <div class="trail-row"><span class="trail-k">Version profiled</span>
+            <span class="trail-v">{{ stats.trail.version_label }}</span></div>
+
+          {% if stats.trail.reused_profile %}
+          <div class="trail-note">♻ Reused a stored profile &mdash; no fresh research this run. The query and sources below are from the run that created it.</div>
+          {% endif %}
+
+          {% if stats.trail.query %}
+          <div class="trail-row"><span class="trail-k">Search query</span>
+            <span class="trail-v mono">{{ stats.trail.query }}</span></div>
+          {% endif %}
+
+          {% if stats.trail.traits %}
+          <div class="trail-k">Extracted traits</div>
+          <ul class="trail-traits">
+            {% for t in stats.trail.traits %}
+            <li>
+              <code>{{ t.code }}</code> = <strong>{{ t.value_label }}</strong>
+              {% if t.confidence is not none %}
+              <span class="conf conf-{{ 'low' if t.confidence < 0.6 else 'ok' }}">{{ '%.0f'|format(t.confidence * 100) }}%</span>
+              {% endif %}
+            </li>
+            {% endfor %}
+          </ul>
+          {% endif %}
+
+          {% if stats.trail.sources %}
+          <div class="trail-k">Sources used ({{ stats.trail.sources | length }})</div>
+          <ul class="trail-sources">
+            {% for src in stats.trail.sources %}
+            <li><a href="{{ src }}" target="_blank" rel="noopener">{{ src }}</a></li>
+            {% endfor %}
+          </ul>
+          {% endif %}
+        </div>
+      </details>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</div>
+
+<div class="card analysis-card">
+  <h3 class="section-title">Power Scaling Analysis</h3>
+  <!-- buildVerdictAccordion() (index.html) splits this into collapsible sections client-side;
+       without JS it still renders as readable prose. -->
+  <div class="verdict-text">{{ verdict_html | safe }}</div>
+</div>
+
+<!-- Scenario scripts land here, generated on demand from the probability bar above. -->
+<div id="script-area"></div>
+
+{% if report.sources_cited %}
+<div class="sources">
+  <strong>Sources cited:</strong>
+  <ul>
+    {% for src in report.sources_cited %}
+    <li><a href="{{ src }}" target="_blank" rel="noopener">{{ src }}</a></li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% endif %}

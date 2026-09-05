@@ -1,0 +1,29 @@
+{% if error %}
+<div class="error-banner">
+  <strong>Couldn't write that scenario:</strong> {{ error }}
+</div>
+{% else %}
+<div class="card analysis-card">
+  <div class="script-header">
+    <h3 class="section-title">🎬 Scenario: {{ scenario_label }}</h3>
+    {% if from_cache %}
+    <span class="cached-note">⚡ retrieved from stored scripts</span>
+    {% endif %}
+  </div>
+
+  {% for scene in scenes %}
+  <div class="script-scene">
+    <h4>Scene {{ scene.scene_number }} &mdash; {{ scene.location }}</h4>
+    <div class="atmosphere">{{ scene.atmosphere }}</div>
+    {% for shot in scene.shots %}
+    <div class="shot">
+      <div class="camera">Shot {{ shot.shot_number }} &middot; {{ shot.camera_angle }}</div>
+      <div class="action">{{ shot.action_description }}</div>
+      {% if shot.dialogue %}<div class="dialogue">&ldquo;{{ shot.dialogue }}&rdquo;</div>{% endif %}
+      <div class="vfx">{{ shot.vfx_notes }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}

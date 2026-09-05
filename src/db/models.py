@@ -49,6 +49,23 @@ class TraitValueType(str, PyEnum):
     TEXT = "text"
 
 
+class ItemCategory(str, PyEnum):
+    WEAPON = "weapon"
+    ARTIFACT = "artifact"
+    ARMOR = "armor"
+    TOOL = "tool"
+    OTHER = "other"
+
+
+class PowerStatus(str, PyEnum):
+    """Whether a character's power development is finished, per continuity. Lives on the
+    form (not the character) because the answer differs by series: Naruto in Shippuden is
+    COMPLETE while Naruto in Boruto is ONGOING."""
+    COMPLETE = "complete"   # series concluded; this version's power level is final
+    ONGOING = "ongoing"     # still publishing; feats may be superseded
+    UNKNOWN = "unknown"
+
+
 class MatchFormat(str, PyEnum):
     ONE_V_ONE = "1v1"
     TEAM_BATTLE = "team_battle"
@@ -154,6 +171,13 @@ class CharacterForm(Base):
     form_name: Mapped[str] = mapped_column(String, nullable=False, default="Base")
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     traits_json: Mapped[Optional[str]] = mapped_column(Text)
+    power_status: Mapped[PowerStatus] = mapped_column(
+        sa_enum(PowerStatus), nullable=False, default=PowerStatus.UNKNOWN
+    )
+    status_note: Mapped[Optional[str]] = mapped_column(Text)
+    # Display-only ("Naruto: Shippuden"); version_era stays the identity key in
+    # idx_form_identity so a prettier label can never fragment character identity.
+    series_label: Mapped[Optional[str]] = mapped_column(String)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
     )
@@ -192,6 +216,33 @@ class Feat(Base):
     trait: Mapped[Optional["TraitCatalog"]] = relationship()
     implied_tier_level: Mapped[Optional["TierScaleLevel"]] = relationship()
     source_research: Mapped["ResearchQuery"] = relationship(back_populates="feats")
+
+
+class Item(Base):
+    """A reusable equipment/artifact catalog (Mjolnir, Infinity Gauntlet, Potara earrings),
+    resolved and disambiguated the same way Character/CharacterForm are: free-text input
+    collapses onto one row instead of a fresh fuzzy string every matchup."""
+
+    __tablename__ = "items"
+    __table_args__ = (UniqueConstraint("name", "origin_universe", name="idx_item_identity"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    origin_universe: Mapped[str] = mapped_column(String, nullable=False, default="Unknown")
+    aliases: Mapped[Optional[str]] = mapped_column(Text)
+    category: Mapped[ItemCategory] = mapped_column(sa_enum(ItemCategory), nullable=False, default=ItemCategory.OTHER)
+    # What it does -- fed straight into the analyst's prompt. Items aren't independently
+    # Parallel-researched (no ItemFeat table); this description is the whole of what the
+    # analyst learns about the item.
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    power_status: Mapped[PowerStatus] = mapped_column(
+        sa_enum(PowerStatus), nullable=False, default=PowerStatus.UNKNOWN
+    )
+    status_note: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
 
 
 class Matchup(Base):
@@ -242,6 +293,24 @@ class ContenderProfile(Base):
 
     matchup: Mapped["Matchup"] = relationship(back_populates="contenders")
     character_form: Mapped["CharacterForm"] = relationship(back_populates="contender_profiles")
+    items: Mapped[list["ContenderItem"]] = relationship(back_populates="contender_profile")
+
+
+class ContenderItem(Base):
+    """Links a matchup side to a reusable Item. Many-to-many at the DB level (an Item can be
+    wielded across many matchups), but each row's usage_note is scoped to this matchup only --
+    same relationship handicaps have to ContenderProfile.custom_modifiers."""
+
+    __tablename__ = "contender_items"
+    __table_args__ = (Index("idx_contender_item_profile", "contender_profile_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contender_profile_id: Mapped[int] = mapped_column(ForeignKey("contender_profiles.id"), nullable=False)
+    item_id: Mapped[int] = mapped_column(ForeignKey("items.id"), nullable=False)
+    usage_note: Mapped[Optional[str]] = mapped_column(Text)
+
+    contender_profile: Mapped["ContenderProfile"] = relationship(back_populates="items")
+    item: Mapped["Item"] = relationship()
 
 
 class Verdict(Base):
@@ -258,17 +327,34 @@ class Verdict(Base):
     winning_factors: Mapped[str] = mapped_column(Text, nullable=False)
     elimination_order: Mapped[Optional[str]] = mapped_column(Text)
 
+    # Outcome distribution in whole percent, summing to 100. Nullable because verdicts
+    # predating this column have no distribution (see _COLUMN_MIGRATIONS in db/base.py).
+    win_probability_a: Mapped[Optional[int]] = mapped_column(Integer)
+    win_probability_b: Mapped[Optional[int]] = mapped_column(Integer)
+    tie_probability: Mapped[Optional[int]] = mapped_column(Integer)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     matchup: Mapped["Matchup"] = relationship(back_populates="verdict")
 
 
+# Which outcome a stored script narrates. The canonical winner's scenario and the two
+# counterfactuals coexist per matchup, so scripts are keyed on (matchup, scenario).
+SCENARIO_A_WINS = "a_wins"
+SCENARIO_B_WINS = "b_wins"
+SCENARIO_TIE = "tie"
+VALID_SCENARIOS = {SCENARIO_A_WINS, SCENARIO_B_WINS, SCENARIO_TIE}
+
+
 class CinematicScene(Base):
     __tablename__ = "cinematic_scenes"
-    __table_args__ = (UniqueConstraint("matchup_id", "scene_number", name="idx_scene_sequence"),)
+    __table_args__ = (
+        UniqueConstraint("matchup_id", "scenario", "scene_number", name="idx_scene_scenario_sequence"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     matchup_id: Mapped[int] = mapped_column(ForeignKey("matchups.id"), nullable=False)
+    scenario: Mapped[str] = mapped_column(String, nullable=False, default=SCENARIO_A_WINS)
     scene_number: Mapped[int] = mapped_column(Integer, nullable=False)
     scene_type: Mapped[Optional[SceneType]] = mapped_column(sa_enum(SceneType))
     location: Mapped[Optional[str]] = mapped_column(String)

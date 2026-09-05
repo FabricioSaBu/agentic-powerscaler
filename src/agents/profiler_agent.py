@@ -16,6 +16,7 @@ from src.agents.base import BaseAgent
 from src.db.models import CharacterForm, Feat as DBFeat, TraitCatalog
 from src.db.repository import get_or_create_trait_catalog, normalize_trait_code
 from src.models.extraction import CharacterProfile
+from src.services.pipeline_state import research_label
 
 
 class ProfilerAgent(BaseAgent):
@@ -27,21 +28,28 @@ class ProfilerAgent(BaseAgent):
         )
 
     async def process(self, context: Dict[str, Any], session: AsyncSession) -> Dict[str, Any]:
-        for side in ("a", "b"):
-            contender_name = context[f"contender_{side}"]
-            form_id = context[f"character_form_{side}_id"]
+        for team in (context["team_a"], context["team_b"]):
+            for member in team:
+                name = member["name"]
+                form_id = member["form_id"]
 
-            if context.get(f"is_known_{side}"):
-                self.log(f"'{contender_name}' already profiled; loading existing data.")
-                context[f"traits_{side}"], context[f"feats_{side}"] = await self._load_existing(session, form_id)
-                continue
+                if member.get("is_known"):
+                    self.log(f"'{name}' already profiled; loading existing data.")
+                    member["traits"], member["feats"] = await self._load_existing(session, form_id)
+                    continue
 
-            self.log(f"Extracting structured profile for '{contender_name}'.")
-            records = context.get(f"research_records_{side}", [])
-            extracted_docs = context.get(f"extracted_documentation_{side}", [])
-            context[f"traits_{side}"], context[f"feats_{side}"] = await self._extract_and_persist(
-                session, form_id, contender_name, records, extracted_docs
-            )
+                # The version-qualified label, not the bare name: search results are
+                # generic ("Vegeta" pages cover every era), so without this the extraction
+                # happily mixes in another era's feats.
+                label = research_label(member)
+                self.log(f"Extracting structured profile for '{label}'.")
+                member["traits"], member["feats"] = await self._extract_and_persist(
+                    session,
+                    form_id,
+                    label,
+                    member.get("research_records", []),
+                    member.get("extracted_docs", []),
+                )
 
         return context
 
@@ -62,10 +70,22 @@ class ProfilerAgent(BaseAgent):
             f"[{i}] {r.snippet} (from {r.source_url})" for i, r in enumerate(records)
         )
         if extracted_docs:
-            numbered_sources += "\n\nExtracted document excerpts:\n" + "\n---\n".join(extracted_docs[:2])
+            # Full page text now (~17k chars each), where this used to be a 200-char stub, so
+            # budget by characters rather than document count: all pages get represented, and
+            # the prompt stays within a sane size.
+            budget = 60_000 // max(len(extracted_docs), 1)
+            numbered_sources += "\n\nExtracted document excerpts:\n" + "\n---\n".join(
+                doc[:budget] for doc in extracted_docs
+            )
 
         prompt = (
             f"Extract a structured power-scaling profile for '{contender_name}' from the numbered sources below.\n\n"
+            f"CRITICAL -- profile ONLY that exact version. The sources are general-purpose pages "
+            f"that usually cover the character's whole history, including later series, forms, and "
+            f"power-ups this version never had. Ignore any feat, transformation, or power source "
+            f"that belongs to a different era or a form beyond the one named above, even when the "
+            f"page presents it prominently. If the sources don't establish a stat for THIS version, "
+            f"omit it or give it low confidence rather than borrowing a stronger version's number.\n\n"
             f"Known trait catalog (reuse one of these codes whenever it genuinely applies):\n{catalog_hint}\n\n"
             f"If '{contender_name}' has a genuinely novel power source, hax ability, or stat not covered by the "
             f"known catalog above, invent a new descriptive snake_case trait_code for it and classify its own "

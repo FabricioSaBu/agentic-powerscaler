@@ -19,6 +19,11 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.35",
     "aiosqlite>=0.20.0",
     "langgraph>=0.2.0",
+    "jinja2>=3.1.0",
+    "python-multipart>=0.0.9",
+    "markdown>=3.6",
+    # Direct dependency (retry on transient Gemini 5xx), not just a langchain transitive.
+    "tenacity>=8.2.0",
 ]
 
 [project.optional-dependencies]

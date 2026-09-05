@@ -80,28 +80,48 @@ class ParallelAdapter:
             "Content-Type": "application/json"
         }
 
+        payload: dict = {"urls": request.urls}
+        if request.objective:
+            payload["objective"] = request.objective
+
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            # Extraction returns full page text, not snippets -- far slower than search.
+            async with httpx.AsyncClient(timeout=90.0) as client:
                 response = await client.post(
                     settings.parallel_extract_url,
-                    json={"urls": request.urls, "format": request.format},
+                    json=payload,
                     headers=headers
                 )
                 response.raise_for_status()
                 data = response.json()
-                
-                extracted = [
-                    ParallelExtractResultItem(
+
+                extracted = []
+                # Response shape: {"results": [{url, title, excerpts: [...], full_content}]}.
+                for item in data.get("results", []):
+                    content = item.get("full_content") or "\n\n".join(item.get("excerpts") or [])
+                    if not content:
+                        continue
+                    extracted.append(ParallelExtractResultItem(
                         url=item.get("url", ""),
                         title=item.get("title"),
-                        content=item.get("content", "")
-                    )
-                    for item in data.get("extracted", [])
-                ]
+                        content=content,
+                    ))
+
+                for err in data.get("errors") or []:
+                    logger.warning(f"Parallel Extract could not fetch a URL: {err}")
+
+                logger.info(
+                    f"Parallel Extract returned {len(extracted)} document(s), "
+                    f"{sum(len(d.content) for d in extracted)} chars."
+                )
                 return ParallelExtractResponse(extracted=extracted)
         except Exception as e:
-            logger.error(f"Parallel Extract API call failed: {e}. Falling back to simulated extract.")
-            return self._mock_extract(request.urls)
+            # Deliberately NOT falling back to fabricated content: a mock document asserting
+            # generic god-tier stats gets extracted as if it were sourced evidence, silently
+            # poisoning profiles. Returning nothing degrades to "we only have snippets",
+            # which the profiler handles honestly.
+            logger.error(f"Parallel Extract API call failed: {e}. Continuing with search snippets only.")
+            return ParallelExtractResponse(extracted=[])
 
     def _mock_search(self, query: str) -> ParallelSearchResponse:
         """Simulates search results with rich feats & scaling data for power scaling matchups."""
@@ -128,12 +148,9 @@ class ParallelAdapter:
         return ParallelSearchResponse(query=query, results=mock_results)
 
     def _mock_extract(self, urls: List[str]) -> ParallelExtractResponse:
-        items = [
-            ParallelExtractResultItem(
-                url=url,
-                title="Power Scaling Document",
-                content=f"Extracted feat document from {url}.\nContender demonstrates multiversal destructive capability, faster-than-light speed feats, and high dimensional resistance."
-            )
-            for url in urls
-        ]
-        return ParallelExtractResponse(extracted=items)
+        """Offline mode (no API key). Returns NO documents rather than invented ones: this
+        previously emitted "multiversal destructive capability, faster-than-light speed
+        feats, and high dimensional resistance" for every URL, which the profiler then
+        extracted as real traits -- giving every character identical god-tier stats."""
+        logger.warning(f"No Parallel API key: skipping extraction of {len(urls)} URL(s).")
+        return ParallelExtractResponse(extracted=[])

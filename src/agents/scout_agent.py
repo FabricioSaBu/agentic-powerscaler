@@ -1,14 +1,22 @@
 """
 Parallel Data Scout Agent.
-Uses the Parallel Search & Extract API to gather power scaling feats, speed, strength, and hax data.
+Uses the Parallel Search & Extract API to gather power scaling feats, speed, strength, and
+hax data for every roster member on both sides.
 """
 
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.agents.base import BaseAgent
 from src.adapters.parallel_adapter import ParallelAdapter
 from src.models.parallel import ParallelSearchRequest, ParallelExtractRequest
-from src.db.repository import create_contender_profile, get_or_create_character_form, persist_research_results
+from src.services.pipeline_state import research_label
+from src.db.repository import (
+    create_contender_item,
+    create_contender_profile,
+    get_or_create_character_form,
+    get_or_create_item,
+    persist_research_results,
+)
 
 
 class ScoutAgent(BaseAgent):
@@ -21,50 +29,85 @@ class ScoutAgent(BaseAgent):
         self.parallel_adapter = parallel_adapter
 
     async def process(self, context: Dict[str, Any], session: AsyncSession) -> Dict[str, Any]:
-        contender_a = context.get("contender_a", "Goku")
-        contender_b = context.get("contender_b", "Superman")
+        team_a: List[Dict[str, Any]] = context["team_a"]
+        team_b: List[Dict[str, Any]] = context["team_b"]
         matchup_id = context["matchup_id"]
+        is_team_battle = len(team_a) > 1 or len(team_b) > 1
 
-        self.log(f"Initiating Parallel web search for: '{contender_a}' vs '{contender_b}'")
-
-        # Resolve (or create) canonical, reusable character records before researching.
-        form_a = await get_or_create_character_form(session, contender_a)
-        form_b = await get_or_create_character_form(session, contender_b)
-        profile_a = await create_contender_profile(session, matchup_id, form_a.id, side_index=1)
-        profile_b = await create_contender_profile(session, matchup_id, form_b.id, side_index=2)
-
-        context["character_form_a_id"] = form_a.id
-        context["character_form_b_id"] = form_b.id
-        context["contender_profile_a_id"] = profile_a.id
-        context["contender_profile_b_id"] = profile_b.id
+        label_a = " & ".join(m["name"] for m in team_a)
+        label_b = " & ".join(m["name"] for m in team_b)
+        self.log(f"Initiating Parallel web search for: '{label_a}' vs '{label_b}'")
 
         sources_cited: List[str] = []
-        search_queries: List[str] = ["{a} vs {b} power scaling comparison".format(a=contender_a, b=contender_b)]
+        search_queries: List[str] = [f"{label_a} vs {label_b} power scaling comparison"]
 
-        for side, contender_name, form in (("a", contender_a, form_a), ("b", contender_b, form_b)):
-            # A character already profiled in a prior matchup (traits_json populated) doesn't
-            # need re-scouting -- ProfilerAgent will load its existing data from the DB instead.
-            if form.traits_json:
-                self.log(f"'{contender_name}' already has a profile; skipping fresh research.")
-                context[f"is_known_{side}"] = True
-                context[f"research_records_{side}"] = []
-                continue
+        for side_index, side_label, team in ((1, "Team A", team_a), (2, "Team B", team_b)):
+            for member in team:
+                # Resolve (or create) the canonical, reusable character record before
+                # researching. Version info (when present) came from the confirmed preview.
+                form = await get_or_create_character_form(
+                    session,
+                    member["name"],
+                    version=member.get("version"),
+                    canonical_name=member.get("canonical"),
+                    franchise=member.get("franchise"),
+                )
+                profile = await create_contender_profile(
+                    session,
+                    matchup_id,
+                    form.id,
+                    side_index=side_index,
+                    custom_modifiers=" | ".join(member.get("handicaps") or []) or None,
+                    team_name=side_label if is_team_battle else None,
+                )
+                member["form_id"] = form.id
+                member["profile_id"] = profile.id
 
-            context[f"is_known_{side}"] = False
-            query = f"{contender_name} feats power tier speed hax wiki respect thread"
-            search_queries.append(query)
+                # Items are reusable across matchups (like characters) but never
+                # independently researched -- their resolved description is all the
+                # analyst learns about them.
+                item_queries = member.get("item_queries") or []
+                for i, item_option in enumerate(member.get("chosen_items") or []):
+                    raw_query = item_queries[i] if i < len(item_queries) else item_option.name
+                    item = await get_or_create_item(session, item_option, raw_query=raw_query)
+                    await create_contender_item(session, profile.id, item.id)
 
-            res = await self.parallel_adapter.search(ParallelSearchRequest(query=query, num_results=5))
-            records = await persist_research_results(session, matchup_id, form.id, query, res)
-            context[f"research_records_{side}"] = records
+                # A character already profiled in a prior matchup (traits_json populated)
+                # doesn't need re-scouting -- ProfilerAgent loads its stored data instead.
+                if form.traits_json:
+                    self.log(f"'{member['name']}' already has a profile; skipping fresh research.")
+                    member["is_known"] = True
+                    member["research_records"] = []
+                    member["extracted_docs"] = []
+                    continue
 
-            urls = [item.url for item in res.results if item.url]
-            sources_cited.extend(urls)
-            extracted_docs = []
-            if urls:
-                extract_res = await self.parallel_adapter.extract(ParallelExtractRequest(urls=urls[:4]))
-                extracted_docs = [doc.content for doc in extract_res.extracted]
-            context[f"extracted_documentation_{side}"] = extracted_docs
+                member["is_known"] = False
+                # Search the *resolved* version, not the raw input -- otherwise picking
+                # "Naruto (Part I)" over "Shippuden" would research identical sources.
+                label = research_label(member)
+                query = f"{label} feats power tier speed hax wiki respect thread"
+                search_queries.append(query)
+
+                res = await self.parallel_adapter.search(ParallelSearchRequest(query=query, num_results=5))
+                member["research_records"] = await persist_research_results(
+                    session, matchup_id, form.id, query, res
+                )
+
+                urls = [item.url for item in res.results if item.url]
+                sources_cited.extend(urls)
+                extracted_docs = []
+                if urls:
+                    # The objective scopes extraction to the confirmed version -- a general
+                    # "Vegeta" page otherwise yields whichever era it emphasises most.
+                    extract_res = await self.parallel_adapter.extract(ParallelExtractRequest(
+                        urls=urls[:4],
+                        objective=(
+                            f"{label} power level, attack potency, speed, durability, "
+                            f"abilities and notable feats"
+                        ),
+                    ))
+                    extracted_docs = [doc.content for doc in extract_res.extracted]
+                member["extracted_docs"] = extracted_docs
 
         matchup_query = search_queries[0]
         res_matchup = await self.parallel_adapter.search(ParallelSearchRequest(query=matchup_query, num_results=3))
