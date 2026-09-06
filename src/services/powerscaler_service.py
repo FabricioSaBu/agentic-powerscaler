@@ -21,6 +21,8 @@ from src.agents.resolver_agent import ResolverAgent
 from src.agents.profiler_agent import ProfilerAgent
 from src.agents.analyst_agent import AnalystAgent
 from src.agents.director_agent import DirectorAgent, scenario_label
+from src.agents.researcher_agent import ResearcherAgent, pending_member
+from langgraph.prebuilt import ToolNode
 from src.db.models import (
     VALID_SCENARIOS,
     Character as DBCharacter,
@@ -116,6 +118,9 @@ class PowerScalerService:
         self.profiler_agent = ProfilerAgent(gemini_service=self.gemini_service)
         self.analyst_agent = AnalystAgent(gemini_service=self.gemini_service)
         self.director_agent = DirectorAgent(gemini_service=self.gemini_service)
+        # Handles the retry path only: the model composes its own query instead of
+        # replaying Scout's template.
+        self.researcher_agent = ResearcherAgent(parallel_adapter=self.parallel_adapter)
 
         self.graph = self._build_graph()
 
@@ -183,12 +188,21 @@ class PowerScalerService:
 
             return {"team_a": team_a, "team_b": team_b, "review_round": rnd + 1}
 
+        async def researcher_node(state: PipelineState, config: RunnableConfig) -> dict:
+            return await self.researcher_agent.think(state)
+
         def route_after_review(state: PipelineState) -> str:
-            rejected = any(
-                m.get("needs_research")
-                for m in list(state.get("team_a", [])) + list(state.get("team_b", []))
-            )
-            return "scout" if rejected else "analyst"
+            # Rejected contenders go to the agentic researcher, which picks its own query
+            # from the reviewer's note rather than re-running Scout's template.
+            return "researcher" if pending_member(state) else "analyst"
+
+        def route_after_researcher(state: PipelineState) -> str:
+            """ReAct loop: run the tool the model asked for, otherwise move on. The tool
+            clears needs_research, so once nothing is pending we go straight to profiling."""
+            messages = state.get("messages") or []
+            if messages and getattr(messages[-1], "tool_calls", None):
+                return "research_tools"
+            return "researcher" if pending_member(state) else "profiler"
 
         def route_after_analyst(state: PipelineState) -> str:
             return "director" if state.get("include_cinematic_script") else END
@@ -197,6 +211,8 @@ class PowerScalerService:
         graph.add_node("scout", scout_node)
         graph.add_node("profiler", profiler_node)
         graph.add_node("review", review_node)
+        graph.add_node("researcher", researcher_node)
+        graph.add_node("research_tools", ToolNode([self.researcher_agent.search_tool]))
         graph.add_node("analyst", analyst_node)
         graph.add_node("director", director_node)
 
@@ -204,7 +220,12 @@ class PowerScalerService:
         graph.add_edge("scout", "profiler")
         graph.add_edge("profiler", "review")
         # The cycle: rejected contenders go back through research with the user's hint.
-        graph.add_conditional_edges("review", route_after_review, {"scout": "scout", "analyst": "analyst"})
+        graph.add_conditional_edges("review", route_after_review, {"researcher": "researcher", "analyst": "analyst"})
+        graph.add_conditional_edges("researcher", route_after_researcher, {
+            "research_tools": "research_tools", "researcher": "researcher", "profiler": "profiler",
+        })
+        # After a tool call the model sees the result and decides whether it is done.
+        graph.add_edge("research_tools", "researcher")
         graph.add_conditional_edges("analyst", route_after_analyst, {"director": "director", END: END})
         graph.add_edge("director", END)
 

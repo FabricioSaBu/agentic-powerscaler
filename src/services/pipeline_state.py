@@ -15,7 +15,9 @@ Everything in this state is checkpointed to SQLite while a run waits at the huma
 gate, so it must stay serializable -- plain dicts and pydantic models only, never ORM rows.
 """
 
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Annotated, Any, Dict, List, Optional, TypedDict
+
+from langgraph.graph.message import add_messages
 
 
 class PipelineState(TypedDict, total=False):
@@ -30,6 +32,10 @@ class PipelineState(TypedDict, total=False):
 
     team_a: List[Dict[str, Any]]
     team_b: List[Dict[str, Any]]
+
+    # Conversation for the agentic retry loop only (ResearcherAgent + ToolNode). Empty on
+    # the deterministic first pass -- the other agents never touch it.
+    messages: Annotated[list, add_messages]
 
     parallel_search_queries: List[str]
     scouted_matchup_discussions: List[str]

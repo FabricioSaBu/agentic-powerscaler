@@ -21,6 +21,9 @@ dependencies = [
     "langgraph>=0.2.0",
     # Persists interrupted runs so the human-review gate survives a restart.
     "langgraph-checkpoint-sqlite>=3.1.1",
+    # Tool-calling chat model for the agentic retry path (ToolNode needs a model that
+    # emits tool_calls; GeminiService's raw SDK client does not).
+    "langchain-google-genai>=4.4.0",
     "jinja2>=3.1.0",
     "python-multipart>=0.0.9",
     "markdown>=3.6",
