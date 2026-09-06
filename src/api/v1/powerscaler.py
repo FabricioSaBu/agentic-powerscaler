@@ -105,7 +105,9 @@ async def evaluate_matchup(request: PowerScalerMatchupRequest, session: AsyncSes
     Scouts feats via Parallel API, evaluates dimensional scaling, and generates a cinematic battle script.
     """
     try:
-        report = await powerscaler_service.run_matchup_pipeline(request, session)
+        # human_review stays off here: the JSON API is non-interactive, so its runs
+        # never pause at the review gate.
+        report, _pending, _thread_id = await powerscaler_service.run_matchup_pipeline(request, session)
         return report
     except PowerScalerException as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=e.message)

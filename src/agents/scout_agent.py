@@ -5,8 +5,10 @@ hax data for every roster member on both sides.
 """
 
 from typing import Any, Dict, List
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.agents.base import BaseAgent
+from src.db.models import Feat as DBFeat
 from src.adapters.parallel_adapter import ParallelAdapter
 from src.models.parallel import ParallelSearchRequest, ParallelExtractRequest
 from src.services.pipeline_state import research_label
@@ -74,7 +76,9 @@ class ScoutAgent(BaseAgent):
 
                 # A character already profiled in a prior matchup (traits_json populated)
                 # doesn't need re-scouting -- ProfilerAgent loads its stored data instead.
-                if form.traits_json:
+                # needs_research overrides the cache: the reviewer rejected this profile,
+                # so the stored data is exactly what we're replacing.
+                if form.traits_json and not member.get("needs_research"):
                     self.log(f"'{member['name']}' already has a profile; skipping fresh research.")
                     member["is_known"] = True
                     member["research_records"] = []
@@ -85,13 +89,29 @@ class ScoutAgent(BaseAgent):
                 # Search the *resolved* version, not the raw input -- otherwise picking
                 # "Naruto (Part I)" over "Shippuden" would research identical sources.
                 label = research_label(member)
+                hint = (member.get("research_hint") or "").strip()
+                if member.get("needs_research"):
+                    # Replacing a rejected profile: drop its feats first. traits_json is
+                    # overwritten by the profiler, but feats are appended, so without this
+                    # the discarded ones would linger alongside the corrections.
+                    await session.execute(delete(DBFeat).where(DBFeat.character_form_id == form.id))
+                    self.log(f"Re-researching '{label}' after review" + (f": {hint}" if hint else "."))
+                    member["needs_research"] = False
+
                 query = f"{label} feats power tier speed hax wiki respect thread"
+                if hint:
+                    query = f"{label} {hint} feats power tier speed hax"
                 search_queries.append(query)
 
                 res = await self.parallel_adapter.search(ParallelSearchRequest(query=query, num_results=5))
-                member["research_records"] = await persist_research_results(
-                    session, matchup_id, form.id, query, res
-                )
+                rows = await persist_research_results(session, matchup_id, form.id, query, res)
+                # Plain dicts, not ORM rows: graph state is checkpointed to SQLite for the
+                # human-review pause, and SQLAlchemy instances are not serializable.
+                member["research_records"] = [
+                    {"id": r.id, "query_text": r.query_text,
+                     "source_url": r.source_url, "snippet": r.snippet}
+                    for r in rows
+                ]
 
                 urls = [item.url for item in res.results if item.url]
                 sources_cited.extend(urls)
@@ -104,6 +124,7 @@ class ScoutAgent(BaseAgent):
                         objective=(
                             f"{label} power level, attack potency, speed, durability, "
                             f"abilities and notable feats"
+                            + (f". Focus specifically on: {hint}" if hint else "")
                         ),
                     ))
                     extracted_docs = [doc.content for doc in extract_res.extracted]

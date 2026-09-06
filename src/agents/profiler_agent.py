@@ -67,7 +67,7 @@ class ProfilerAgent(BaseAgent):
         catalog_hint = "\n".join(f"- {t.code}: {t.display_name} ({t.category.value}, {t.value_type.value})" for t in known_traits)
 
         numbered_sources = "\n".join(
-            f"[{i}] {r.snippet} (from {r.source_url})" for i, r in enumerate(records)
+            f"[{i}] {r['snippet']} (from {r['source_url']})" for i, r in enumerate(records)
         )
         if extracted_docs:
             # Full page text now (~17k chars each), where this used to be a 200-char stub, so
@@ -130,7 +130,7 @@ class ProfilerAgent(BaseAgent):
                 title=feat.title,
                 description=feat.description,
                 confidence=feat.confidence,
-                source_research_id=source.id,
+                source_research_id=source["id"],
             ))
             feat_dicts.append({"title": feat.title, "description": feat.description})
 

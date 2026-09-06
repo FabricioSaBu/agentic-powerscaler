@@ -620,6 +620,38 @@ html[data-theme="light"] .badge-ongoing { color: #92650b; }
   padding: 0.2rem 0.55rem; border-radius: 6px; font-size: 0.75rem;
 }
 
+/* ---------- Human review gate ---------- */
+.review-card { position: relative; }
+.review-card h3 { margin-top: 0.5rem; }
+.review-flagged { border-color: rgba(251,191,36,0.45); box-shadow: 0 0 22px rgba(251,191,36,0.10); }
+
+.review-check {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.45rem 0.6rem; margin: -0.25rem 0 0.35rem;
+  border: 1px solid var(--panel-border); border-radius: 8px;
+  background: var(--chip-bg);
+  cursor: pointer; text-transform: none; letter-spacing: 0;
+  font-size: 0.82rem; font-weight: 600; color: var(--text);
+}
+.review-check:hover { border-color: var(--accent); }
+.review-check input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+
+.review-warn {
+  margin: 0.35rem 0 0.6rem; padding: 0.4rem 0.55rem;
+  border-radius: 6px; font-size: 0.75rem; line-height: 1.4;
+  color: #fbbf24; background: rgba(251,191,36,0.10); border: 1px solid rgba(251,191,36,0.30);
+}
+html[data-theme="light"] .review-warn { color: #8a5d06; }
+
+.review-cap {
+  max-width: 640px; margin: 0 auto 1.25rem; text-align: center;
+  padding: 0.55rem 0.8rem; border-radius: 8px; font-size: 0.8rem;
+  color: var(--text-dim); background: var(--chip-bg); border: 1px solid var(--panel-border);
+}
+
+.hint-row { margin-top: 0.85rem; padding-top: 0.7rem; border-top: 1px dashed var(--panel-border); }
+.hint-row input { width: 100%; }
+
 /* ---------- Research trail (per contender) ---------- */
 .trail { margin-top: 0.85rem; border-top: 1px dashed var(--panel-border); padding-top: 0.6rem; }
 .trail summary {

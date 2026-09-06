@@ -31,6 +31,8 @@ artifacts/
 # a bare *.bak would not match those, since they don't end in .bak)
 *.db
 *.db.*
+*.db-shm
+*.db-wal
 *.sqlite3
 *.bak
 *.bak-*

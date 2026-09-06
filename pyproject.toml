@@ -19,6 +19,8 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.35",
     "aiosqlite>=0.20.0",
     "langgraph>=0.2.0",
+    # Persists interrupted runs so the human-review gate survives a restart.
+    "langgraph-checkpoint-sqlite>=3.1.1",
     "jinja2>=3.1.0",
     "python-multipart>=0.0.9",
     "markdown>=3.6",

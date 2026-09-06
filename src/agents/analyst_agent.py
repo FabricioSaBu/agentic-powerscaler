@@ -87,8 +87,8 @@ async def _build_trail(session: AsyncSession, member: Dict[str, Any]) -> Researc
     query = ""
     sources = []
     if records:
-        query = records[0].query_text
-        sources = [r.source_url for r in records if r.source_url]
+        query = records[0]["query_text"]
+        sources = [r["source_url"] for r in records if r.get("source_url")]
     elif member.get("form_id"):
         stored = (
             await session.execute(

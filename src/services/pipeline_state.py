@@ -9,6 +9,10 @@ Member dict keys:
                      chosen_items (List[ItemOption])
   added by Scout:    form_id, profile_id, is_known, research_records, extracted_docs
   added by Profiler: traits (Dict), feats (List[Dict])
+  set by Review:     needs_research (bool), research_hint (str) when the user rejects a member
+
+Everything in this state is checkpointed to SQLite while a run waits at the human-review
+gate, so it must stay serializable -- plain dicts and pydantic models only, never ORM rows.
 """
 
 from typing import Any, Dict, List, Optional, TypedDict
@@ -18,6 +22,11 @@ class PipelineState(TypedDict, total=False):
     matchup_id: int
     battle_environment: str
     include_cinematic_script: bool
+
+    # Human-in-the-loop gate. Only the web UI sets human_review; the JSON API leaves it
+    # unset so its runs never pause.
+    human_review: bool
+    review_round: int
 
     team_a: List[Dict[str, Any]]
     team_b: List[Dict[str, Any]]

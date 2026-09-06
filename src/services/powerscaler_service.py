@@ -11,9 +11,10 @@ import uuid
 from sqlalchemy import select
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, END
+from langgraph.types import Command, interrupt
 from src.core.logging import logger
 from src.services.gemini_service import GeminiService
-from src.services.pipeline_state import PipelineState
+from src.services.pipeline_state import PipelineState, research_label
 from src.adapters.parallel_adapter import ParallelAdapter
 from src.agents.scout_agent import ScoutAgent
 from src.agents.resolver_agent import ResolverAgent
@@ -55,13 +56,53 @@ def _member_state(spec: ContenderSpec) -> dict:
     }
 
 
+MAX_REVIEW_ROUNDS = 3
+"""A rejected contender goes back through research; cap the loop so a user who keeps
+rejecting can't cycle forever."""
+
+
+def _review_card(member: dict) -> dict:
+    """One contender's summary for the review screen: what we believe, and what it came
+    from. Flagging is presentation only -- a human reads the sources, so there is no
+    fragile era-detection heuristic here, just a nudge toward the weak-looking rows."""
+    traits = member.get("traits") or {}
+    confidences = [
+        d.get("confidence") for d in traits.values() if isinstance(d, dict) and d.get("confidence") is not None
+    ]
+    records = member.get("research_records") or []
+    reasons = []
+    if confidences and min(confidences) < 0.6:
+        reasons.append("low confidence on at least one stat")
+    if len(traits) < 2:
+        reasons.append("very little was extracted")
+    if not records and not member.get("is_known"):
+        reasons.append("no sources were retrieved")
+
+    return {
+        "name": member["name"],
+        "version_label": research_label(member),
+        "reused_profile": bool(member.get("is_known")),
+        "query": records[0]["query_text"] if records else "",
+        "sources": list(dict.fromkeys(r["source_url"] for r in records if r.get("source_url"))),
+        "traits": [
+            {"code": code, "value_label": str(d.get("value_label", "")), "confidence": d.get("confidence")}
+            for code, d in traits.items()
+        ],
+        "feats": [f.get("title", "") for f in (member.get("feats") or [])],
+        "flagged": bool(reasons),
+        "flag_reason": "; ".join(reasons),
+    }
+
+
 def team_label(members: list) -> str:
     """Display name for one side: 'Goku & Vegeta'."""
     return " & ".join(m["name"] if isinstance(m, dict) else m.name for m in members)
 
 
 class PowerScalerService:
-    def __init__(self):
+    def __init__(self, checkpointer=None):
+        # Supplied at app startup so a paused run outlives the request that created it.
+        self.checkpointer = checkpointer
         self.gemini_service = GeminiService()
         self.parallel_adapter = ParallelAdapter()
 
@@ -77,6 +118,19 @@ class PowerScalerService:
         self.director_agent = DirectorAgent(gemini_service=self.gemini_service)
 
         self.graph = self._build_graph()
+
+    async def attach_checkpointer(self, db_path: str) -> None:
+        """Called once at app startup. The saver holds an aiosqlite connection that must
+        outlive individual requests -- a paused run waits at the review gate across two
+        separate HTTP calls -- so it is created here rather than per request."""
+        import aiosqlite
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+        conn = await aiosqlite.connect(db_path)
+        self.checkpointer = AsyncSqliteSaver(conn)
+        await self.checkpointer.setup()
+        self.graph = self._build_graph()   # recompile so the graph actually uses it
+        logger.info(f"Human-review checkpointer ready at {db_path}")
 
     def _build_graph(self):
         """Scout -> Profiler -> Analyst -> (Director, if requested) -> END.
@@ -98,22 +152,63 @@ class PowerScalerService:
             config["configurable"]["matchup"].status = DBMatchupStatus.SCRIPTING
             return await self.director_agent.process(state, config["configurable"]["session"])
 
+        async def review_node(state: PipelineState, config: RunnableConfig) -> dict:
+            """Pauses the run so a person can confirm each contender's data before the
+            verdict. Kept deliberately tiny: resuming re-executes the whole node, so any
+            expensive work here would be repeated on every approval."""
+            if not state.get("human_review"):
+                return {}   # JSON API path -- never pauses
+            rnd = state.get("review_round", 0)
+            if rnd >= MAX_REVIEW_ROUNDS:
+                return {}   # safety cap; the screen told the user this was the last round
+
+            team_a, team_b = state["team_a"], state["team_b"]
+            decision = interrupt({
+                "round": rnd,
+                "max_rounds": MAX_REVIEW_ROUNDS,
+                "team_a": [_review_card(m) for m in team_a],
+                "team_b": [_review_card(m) for m in team_b],
+            })
+
+            # decision: {"a": [{"approved": bool, "hint": str}, ...], "b": [...]}
+            for side, team in (("a", team_a), ("b", team_b)):
+                for index, member in enumerate(team):
+                    verdicts = (decision or {}).get(side) or []
+                    choice = verdicts[index] if index < len(verdicts) else {}
+                    if choice.get("approved", True):
+                        member["needs_research"] = False
+                        continue
+                    member["needs_research"] = True
+                    member["research_hint"] = (choice.get("hint") or "").strip()
+
+            return {"team_a": team_a, "team_b": team_b, "review_round": rnd + 1}
+
+        def route_after_review(state: PipelineState) -> str:
+            rejected = any(
+                m.get("needs_research")
+                for m in list(state.get("team_a", [])) + list(state.get("team_b", []))
+            )
+            return "scout" if rejected else "analyst"
+
         def route_after_analyst(state: PipelineState) -> str:
             return "director" if state.get("include_cinematic_script") else END
 
         graph = StateGraph(PipelineState)
         graph.add_node("scout", scout_node)
         graph.add_node("profiler", profiler_node)
+        graph.add_node("review", review_node)
         graph.add_node("analyst", analyst_node)
         graph.add_node("director", director_node)
 
         graph.set_entry_point("scout")
         graph.add_edge("scout", "profiler")
-        graph.add_edge("profiler", "analyst")
+        graph.add_edge("profiler", "review")
+        # The cycle: rejected contenders go back through research with the user's hint.
+        graph.add_conditional_edges("review", route_after_review, {"scout": "scout", "analyst": "analyst"})
         graph.add_conditional_edges("analyst", route_after_analyst, {"director": "director", END: END})
         graph.add_edge("director", END)
 
-        return graph.compile()
+        return graph.compile(checkpointer=self.checkpointer)
 
     async def resolve_versions(
         self,
@@ -197,8 +292,59 @@ class PowerScalerService:
         await session.commit()
         return scenes, False, label
 
-    async def run_matchup_pipeline(self, request: PowerScalerMatchupRequest, session) -> PowerScalerReport:
-        """Executes full autonomous power scaling workflow, persisting each stage as it completes."""
+    async def _drive(self, payload, session, matchup, thread_id: str):
+        """Runs (or resumes) the graph, owning matchup status and commit/error handling.
+        Returns the graph state -- which carries __interrupt__ when it paused for review."""
+        try:
+            state = await self.graph.ainvoke(
+                payload,
+                config={"configurable": {
+                    "thread_id": thread_id, "session": session, "matchup": matchup,
+                }},
+            )
+            if not state.get("__interrupt__"):
+                matchup.status = DBMatchupStatus.COMPLETED
+            await session.commit()
+            return state
+        except Exception as e:
+            # Deliberately not rolling back: whatever research/profiles were already flushed
+            # (e.g. Scout succeeded but Analyst failed) are kept rather than discarded.
+            matchup.status = DBMatchupStatus.FAILED
+            matchup.error_message = str(e)
+            await session.commit()
+            raise
+
+    async def resume_review(self, thread_id: str, decision: dict, session):
+        """Continues a run paused at the review gate. The checkpointer holds the state; the
+        request-scoped session and matchup row have to be supplied fresh each time."""
+        matchup = (
+            await session.execute(select(DBMatchup).where(DBMatchup.report_id == thread_id))
+        ).scalar_one_or_none()
+        if matchup is None:
+            raise PowerScalerException("That run has expired -- start the matchup again.")
+
+        final_state = await self._drive(Command(resume=decision), session, matchup, thread_id)
+        if final_state.get("__interrupt__"):
+            return None, final_state["__interrupt__"][0].value, thread_id
+
+        report = PowerScalerReport(
+            report_id=matchup.report_id,
+            matchup=matchup.title,
+            timestamp=datetime.now(timezone.utc),
+            verdict=final_state["verdict"],
+            cinematic_battle_script=final_state.get("cinematic_battle_script"),
+            parallel_search_queries=final_state.get("parallel_search_queries", []),
+            sources_cited=final_state.get("sources_cited", []),
+        )
+        return report, None, thread_id
+
+    async def run_matchup_pipeline(
+        self, request: PowerScalerMatchupRequest, session, human_review: bool = False
+    ):
+        """Executes the full power scaling workflow, persisting each stage as it completes.
+
+        With human_review=True the run pauses at the review gate and returns
+        (None, review_payload, thread_id); otherwise it returns (report, None, thread_id)."""
         team_a, team_b = request.rosters()
         if not team_a or not team_b:
             raise ValueError("Both sides need at least one contender.")
@@ -224,22 +370,16 @@ class PowerScalerService:
             "include_cinematic_script": request.include_cinematic_script,
             "team_a": [_member_state(m) for m in team_a],
             "team_b": [_member_state(m) for m in team_b],
+            "human_review": human_review,
+            "review_round": 0,
         }
 
-        try:
-            final_state = await self.graph.ainvoke(
-                initial_state,
-                config={"configurable": {"session": session, "matchup": matchup}},
-            )
-            matchup.status = DBMatchupStatus.COMPLETED
-            await session.commit()
-        except Exception as e:
-            # Deliberately not rolling back: whatever research/profiles were already flushed
-            # (e.g. Scout succeeded but Analyst failed) are kept rather than discarded.
-            matchup.status = DBMatchupStatus.FAILED
-            matchup.error_message = str(e)
-            await session.commit()
-            raise
+        thread_id = report_id
+        final_state = await self._drive(
+            initial_state, session, matchup, thread_id
+        )
+        if final_state.get("__interrupt__"):
+            return None, final_state["__interrupt__"][0].value, thread_id
 
         report = PowerScalerReport(
             report_id=report_id,
@@ -252,4 +392,4 @@ class PowerScalerService:
         )
 
         logger.info(f"PowerScaler pipeline [{report_id}] successfully finished.")
-        return report
+        return report, None, thread_id

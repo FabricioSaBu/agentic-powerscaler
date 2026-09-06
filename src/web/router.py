@@ -112,6 +112,26 @@ def _confirmed_rosters(
     return team_a, team_b
 
 
+def _render_run(request: Request, report, pending, thread_id: str):
+    """A run either paused for review or produced a verdict -- render whichever."""
+    if pending is not None:
+        return templates.TemplateResponse(request, "_review.html", {
+            "request": request,
+            "review": pending,
+            "thread_id": thread_id,
+            "last_round": pending.get("round", 0) + 1 >= pending.get("max_rounds", 3),
+            "error": None,
+        })
+    return templates.TemplateResponse(request, "_result.html", {
+        "request": request,
+        "report": report,
+        "verdict": report.verdict,
+        "verdict_html": markdown.markdown(report.verdict.summary_verdict),
+        "is_team_battle": len(report.verdict.team_a_stats) > 1 or len(report.verdict.team_b_stats) > 1,
+        "error": None,
+    })
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     # Cache-bust the stylesheet by its mtime: the URL changes whenever the file is edited, so
@@ -198,7 +218,7 @@ async def evaluate(
         team_a, team_b = _confirmed_rosters(
             form.get("roster_json", ""), form.get("resolution_json", ""), form
         )
-        report = await powerscaler_service.run_matchup_pipeline(
+        report, pending, thread_id = await powerscaler_service.run_matchup_pipeline(
             PowerScalerMatchupRequest(
                 team_a=team_a,
                 team_b=team_b,
@@ -206,15 +226,40 @@ async def evaluate(
                 include_cinematic_script=form.get("include_cinematic_script") == "true",
             ),
             session,
+            human_review=True,
         )
-        context = {
-            "request": request,
-            "report": report,
-            "verdict": report.verdict,
-            "verdict_html": markdown.markdown(report.verdict.summary_verdict),
-            "is_team_battle": len(report.verdict.team_a_stats) > 1 or len(report.verdict.team_b_stats) > 1,
-            "error": None,
-        }
+        return _render_run(request, report, pending, thread_id)
+    except (PowerScalerException, ValueError) as e:
+        context = {"request": request, "error": getattr(e, "message", None) or str(e)}
+    except Exception as e:
+        context = {"request": request, "error": str(e)}
+
+    return templates.TemplateResponse(request, "_result.html", context)
+
+
+@router.post("/resume", response_class=HTMLResponse)
+async def resume(request: Request, session: AsyncSession = Depends(get_session)):
+    """Continues a run paused at the review gate, carrying the reviewer's per-contender
+    approvals. Reads the raw form because the field names are indexed per contender."""
+    try:
+        form = await request.form()
+        thread_id = form.get("thread_id", "")
+        decision = {}
+        for side in ("a", "b"):
+            entries = []
+            index = 0
+            while f"present_{side}_{index}" in form:
+                entries.append({
+                    "approved": form.get(f"approved_{side}_{index}") == "on",
+                    "hint": form.get(f"hint_{side}_{index}", ""),
+                })
+                index += 1
+            decision[side] = entries
+
+        report, pending, thread_id = await powerscaler_service.resume_review(
+            thread_id, decision, session
+        )
+        return _render_run(request, report, pending, thread_id)
     except (PowerScalerException, ValueError) as e:
         context = {"request": request, "error": getattr(e, "message", None) or str(e)}
     except Exception as e:

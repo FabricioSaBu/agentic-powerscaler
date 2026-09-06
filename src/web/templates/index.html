@@ -289,6 +289,12 @@
       'Evaluating hax interactions & resistances…',
       'Generating final verdict & battle screenplay…'
     ];
+    var RESUME_STEPS = [
+      'Applying your review…',
+      'Re-researching flagged contenders…',
+      'Re-extracting traits & feats…',
+      'Scaling the fight…'
+    ];
     var SCRIPT_STEPS = [
       'Setting the stage…',
       'Choreographing the clash…',
@@ -333,6 +339,7 @@
       if (path === '/evaluate') startTicker(EVAL_STEPS, 10000);
       else if (path === '/preview') startTicker(PREVIEW_STEPS, 2600);
       else if (path === '/script') { closeScriptModal(); startTicker(SCRIPT_STEPS, 6000); }
+      else if (path === '/resume') startTicker(RESUME_STEPS, 9000);
     });
     document.body.addEventListener('htmx:afterRequest', stopTicker);
 
