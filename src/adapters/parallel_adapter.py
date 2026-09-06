@@ -9,6 +9,7 @@ import httpx
 from langsmith import traceable
 from src.core.config import settings
 from src.core.logging import logger
+from src.core.progress import report
 from src.models.parallel import (
     ParallelSearchRequest,
     ParallelSearchResponse,
@@ -27,6 +28,7 @@ class ParallelAdapter:
     async def search(self, request: ParallelSearchRequest) -> ParallelSearchResponse:
         """Executes a Parallel Search query to retrieve web context & feat references."""
         logger.info(f"Parallel Search API query: '{request.query}'")
+        report(f"Searching: {request.query[:90]}")
         
         if not self.api_key:
             logger.info("PARALLEL_API_KEY unset; providing simulated Parallel Search response for offline mode.")
@@ -71,6 +73,7 @@ class ParallelAdapter:
     async def extract(self, request: ParallelExtractRequest) -> ParallelExtractResponse:
         """Executes a Parallel Extract request to get full markdown text from web pages."""
         logger.info(f"Parallel Extract API for {len(request.urls)} URLs.")
+        report(f"Reading {len(request.urls)} source pages… (this is the slow part)")
         
         if not self.api_key:
             return self._mock_extract(request.urls)
@@ -110,10 +113,9 @@ class ParallelAdapter:
                 for err in data.get("errors") or []:
                     logger.warning(f"Parallel Extract could not fetch a URL: {err}")
 
-                logger.info(
-                    f"Parallel Extract returned {len(extracted)} document(s), "
-                    f"{sum(len(d.content) for d in extracted)} chars."
-                )
+                chars = sum(len(d.content) for d in extracted)
+                logger.info(f"Parallel Extract returned {len(extracted)} document(s), {chars} chars.")
+                report(f"Read {len(extracted)} pages, {chars:,} characters of source text")
                 return ParallelExtractResponse(extracted=extracted)
         except Exception as e:
             # Deliberately NOT falling back to fabricated content: a mock document asserting

@@ -7,6 +7,7 @@ from typing import Any, Dict
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.services.gemini_service import GeminiService
 from src.core.logging import logger
+from src.core.progress import report
 
 
 class BaseAgent(ABC):
@@ -22,3 +23,5 @@ class BaseAgent(ABC):
 
     def log(self, message: str):
         logger.info(f"[{self.name} | {self.role}] {message}")
+        # Surfaced live in the UI's progress panel; a no-op when no run is being watched.
+        report(message)

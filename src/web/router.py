@@ -11,7 +11,7 @@ fields; the preview's per-member selects come back as `version_{side}_{i}` /
 
 import json
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import markdown
 from fastapi import APIRouter, Request, Form, Depends
@@ -25,6 +25,7 @@ from src.db.base import get_session
 from src.models.matchup import MAX_TEAM_SIZE, ContenderSpec, PowerScalerMatchupRequest
 from src.models.preview import MatchupResolution
 from src.core.exceptions import PowerScalerException
+from src.core.progress import current_run, progress
 from src.api.v1.powerscaler import powerscaler_service
 
 router = APIRouter(tags=["Web"])
@@ -112,6 +113,22 @@ def _confirmed_rosters(
     return team_a, team_b
 
 
+@router.get("/progress/{run_id}")
+async def run_progress(run_id: str):
+    """Polled by the loading HUD while a long request is in flight. In-memory only --
+    progress is disposable, and a missed poll just means a slightly stale panel."""
+    return progress.snapshot(run_id)
+
+
+def _begin_run(form) -> Optional[str]:
+    """Binds this request to the client-generated run id so every agent's log() lands in
+    the right progress stream. The client generates it because it has to start polling
+    before the response exists."""
+    run_id = (form.get("run_id") or "").strip() or None
+    current_run.set(run_id)
+    return run_id
+
+
 def _render_run(request: Request, report, pending, thread_id: str):
     """A run either paused for review or produced a verdict -- render whichever."""
     if pending is not None:
@@ -148,10 +165,12 @@ async def preview(
     roster_json: str = Form(""),
     battle_environment: str = Form(""),
     include_cinematic_script: bool = Form(False),
+    run_id: str = Form(""),
     session: AsyncSession = Depends(get_session),
 ):
     """Step 1: resolve which character versions (and items) to use for every roster member,
     for the user to confirm or change before the expensive research pipeline runs."""
+    current_run.set(run_id or None)
     try:
         team_a, team_b = _parse_roster(roster_json)
         resolution = await powerscaler_service.resolve_versions(team_a, team_b, session)
@@ -183,10 +202,12 @@ async def script(
     request: Request,
     report_id: str = Form(...),
     scenario: str = Form(...),
+    run_id: str = Form(""),
     session: AsyncSession = Depends(get_session),
 ):
     """On-demand screenplay for one outcome of a finished matchup, triggered by clicking a
     segment of the probability bar. Served from storage when that scenario already exists."""
+    current_run.set(run_id or None)
     try:
         scenes, from_cache, label = await powerscaler_service.generate_scenario_script(
             report_id, scenario, session
@@ -215,6 +236,7 @@ async def evaluate(
     Reads the raw form because the select names are dynamic (version_{side}_{i}, ...)."""
     try:
         form = await request.form()
+        _begin_run(form)
         team_a, team_b = _confirmed_rosters(
             form.get("roster_json", ""), form.get("resolution_json", ""), form
         )
@@ -243,6 +265,7 @@ async def resume(request: Request, session: AsyncSession = Depends(get_session))
     approvals. Reads the raw form because the field names are indexed per contender."""
     try:
         form = await request.form()
+        _begin_run(form)
         thread_id = form.get("thread_id", "")
         decision = {}
         for side in ("a", "b"):

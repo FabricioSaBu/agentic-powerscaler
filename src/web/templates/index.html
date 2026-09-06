@@ -272,76 +272,68 @@
     addMember('a');
     addMember('b');
 
-    // ---------- Agentic loading HUD ----------
-    // One HTMX POST covers the whole pipeline, so the ticker paces itself on typical stage
-    // timings rather than real progress events -- the last step holds until the response lands.
-    var PREVIEW_STEPS = [
-      'Resolving canonical identities…',
-      'Scanning continuities, eras & forms…',
-      'Cross-checking stored profiles & item catalog…',
-      'Preparing version options…'
-    ];
-    var EVAL_STEPS = [
-      'Locking in confirmed versions & equipment…',
-      'Scouting feats via Parallel Search…',
-      'Extracting structured traits & power profiles…',
-      'Parsing cosmology & dimensional tiering…',
-      'Evaluating hax interactions & resistances…',
-      'Generating final verdict & battle screenplay…'
-    ];
-    var RESUME_STEPS = [
-      'Applying your review…',
-      'Re-researching flagged contenders…',
-      'Re-extracting traits & feats…',
-      'Scaling the fight…'
-    ];
-    var SCRIPT_STEPS = [
-      'Setting the stage…',
-      'Choreographing the clash…',
-      'Directing shots, VFX & dialogue…'
-    ];
-    var stepTimer = null;
+    // ---------- Live progress HUD ----------
+    // The steps shown are the agents' own log lines, polled from /progress while the
+    // request is in flight. Previously these advanced on fixed timers, which meant a step
+    // could sit spinning long after its work finished -- honest labels, invented pacing.
+    var runId = null;
+    var pollTimer = null;
 
-    function startTicker(steps, interval) {
-      stopTicker();
+    function newRunId() {
+      try { return crypto.randomUUID(); }
+      catch (e) { return 'run-' + Date.now() + '-' + Math.random().toString(16).slice(2); }
+    }
+
+    function renderSteps(steps, done) {
       var list = document.getElementById('agent-steps');
-      list.innerHTML = '';
-      steps.forEach(function (label) {
-        var li = document.createElement('li');
-        var tick = document.createElement('span');
-        tick.className = 'tick';
-        var text = document.createElement('span');
-        text.textContent = label;
-        li.appendChild(tick);
-        li.appendChild(text);
-        list.appendChild(li);
-      });
-      var items = Array.prototype.slice.call(list.children);
-      var current = 0;
-      function paint() {
-        items.forEach(function (li, idx) {
-          li.className = idx < current ? 'done' : (idx === current ? 'active' : '');
-          li.querySelector('.tick').textContent = idx < current ? '✓' : (idx === current ? '⟳' : '○');
-        });
+      if (!steps.length) {
+        list.innerHTML = '<li class="active"><span class="tick">\u27F3</span><span>Starting\u2026</span></li>';
+        return;
       }
-      paint();
-      stepTimer = setInterval(function () {
-        if (current < steps.length - 1) { current++; paint(); }
-      }, interval);
+      list.innerHTML = steps.map(function (s, i) {
+        var isLast = i === steps.length - 1;
+        var cls = (isLast && !done) ? 'active' : 'done';
+        var tick = (isLast && !done) ? '\u27F3' : '\u2713';
+        var text = s.message.replace(/[<>&]/g, function (c) {
+          return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c];
+        });
+        return '<li class="' + cls + '"><span class="tick">' + tick + '</span><span>' + text + '</span></li>';
+      }).join('');
+      // Keep the newest step in view once the list gets long.
+      list.scrollTop = list.scrollHeight;
     }
 
-    function stopTicker() {
-      if (stepTimer) { clearInterval(stepTimer); stepTimer = null; }
+    function startProgress() {
+      stopProgress();
+      renderSteps([], false);
+      pollTimer = setInterval(function () {
+        if (!runId) return;
+        fetch('/progress/' + runId, { cache: 'no-store' })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (d) { if (d) renderSteps(d.steps || [], d.done); })
+          .catch(function () { /* a dropped poll just leaves the panel briefly stale */ });
+      }, 900);
     }
+
+    function stopProgress() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+
+    // Every long request carries a client-generated run id: polling has to start before
+    // the response (and any server-side id) exists.
+    document.body.addEventListener('htmx:configRequest', function (evt) {
+      var path = (evt.detail.path || '');
+      if (['/preview', '/evaluate', '/resume', '/script'].indexOf(path) === -1) return;
+      runId = newRunId();
+      evt.detail.parameters['run_id'] = runId;
+    });
 
     document.body.addEventListener('htmx:beforeRequest', function (evt) {
       var path = (evt.detail.requestConfig && evt.detail.requestConfig.path) || '';
-      if (path === '/evaluate') startTicker(EVAL_STEPS, 10000);
-      else if (path === '/preview') startTicker(PREVIEW_STEPS, 2600);
-      else if (path === '/script') { closeScriptModal(); startTicker(SCRIPT_STEPS, 6000); }
-      else if (path === '/resume') startTicker(RESUME_STEPS, 9000);
+      if (path === '/script') closeScriptModal();
+      if (['/preview', '/evaluate', '/resume', '/script'].indexOf(path) !== -1) startProgress();
     });
-    document.body.addEventListener('htmx:afterRequest', stopTicker);
+    document.body.addEventListener('htmx:afterRequest', stopProgress);
 
     // ---------- Analysis accordion ----------
     // The verdict arrives as one long markdown-rendered block; split it into collapsible

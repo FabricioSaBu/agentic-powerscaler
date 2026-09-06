@@ -338,7 +338,12 @@ button.submit:disabled { opacity: 0.6; cursor: not-allowed; }
   100% { transform: translateX(380%); }
 }
 
-.hud-steps { list-style: none; margin: 1.1rem 0 0; padding: 0; }
+.hud-steps {
+  list-style: none; margin: 1.1rem 0 0; padding: 0;
+  /* Real progress can produce many lines (one per contender, per stage) -- scroll the
+     panel rather than letting it shove the page down mid-run. */
+  max-height: 190px; overflow-y: auto;
+}
 .hud-steps li {
   display: flex; gap: 0.6rem; align-items: baseline;
   padding: 0.34rem 0; font-size: 0.86rem;
@@ -348,7 +353,7 @@ button.submit:disabled { opacity: 0.6; cursor: not-allowed; }
 .hud-steps li .tick { display: inline-block; width: 1.1em; text-align: center; }
 .hud-steps li.active { color: var(--text); opacity: 1; animation: step-in 0.35s ease; }
 .hud-steps li.active .tick { color: var(--cyan); animation: spin 1.1s linear infinite; }
-.hud-steps li.done { opacity: 0.75; }
+.hud-steps li.done { opacity: 0.6; }
 .hud-steps li.done .tick { color: var(--emerald); }
 @keyframes step-in { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes spin { to { transform: rotate(360deg); } }
