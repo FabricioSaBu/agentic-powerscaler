@@ -1,7 +1,7 @@
 """
-Shared state schema for the LangGraph-orchestrated matchup pipeline.
+Shared state schema for the ADK-orchestrated matchup pipeline.
 Sides are rosters: team_a/team_b are lists of member dicts that agents enrich in place
-as the state flows Scout -> Profiler -> Analyst -> Director.
+as the state flows Scout -> Profiler -> [Researcher -> Profiler]* -> Analyst -> Director.
 
 Member dict keys:
   from the request:  name, canonical, franchise, version (CharacterVersionOption | None),
@@ -11,13 +11,12 @@ Member dict keys:
   added by Profiler: traits (Dict), feats (List[Dict])
   set by Review:     needs_research (bool), research_hint (str) when the user rejects a member
 
-Everything in this state is checkpointed to SQLite while a run waits at the human-review
-gate, so it must stay serializable -- plain dicts and pydantic models only, never ORM rows.
+A run paused at the human-review gate persists this whole dict as JSON on the Matchup row
+(see PowerScalerService._serialize_state), so it must stay serializable -- plain dicts and
+pydantic models only, never ORM rows.
 """
 
-from typing import Annotated, Any, Dict, List, Optional, TypedDict
-
-from langgraph.graph.message import add_messages
+from typing import Any, Dict, List, Optional, TypedDict
 
 
 class PipelineState(TypedDict, total=False):
@@ -25,17 +24,10 @@ class PipelineState(TypedDict, total=False):
     battle_environment: str
     include_cinematic_script: bool
 
-    # Human-in-the-loop gate. Only the web UI sets human_review; the JSON API leaves it
-    # unset so its runs never pause.
-    human_review: bool
     review_round: int
 
     team_a: List[Dict[str, Any]]
     team_b: List[Dict[str, Any]]
-
-    # Conversation for the agentic retry loop only (ResearcherAgent + ToolNode). Empty on
-    # the deterministic first pass -- the other agents never touch it.
-    messages: Annotated[list, add_messages]
 
     parallel_search_queries: List[str]
     scouted_matchup_discussions: List[str]

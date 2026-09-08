@@ -1,12 +1,12 @@
 """
 Google Gemini AI Service Wrapper.
-Integrates with official google-genai SDK.
+Integrates with the official google-genai SDK, talking to Vertex AI (Google Cloud) when a
+project is configured, and falling back to the AI Studio API key for local/offline dev.
 """
 
 from typing import Optional, Dict, Any, Type, TypeVar
 from google import genai
 from google.genai import errors as genai_errors
-from langsmith.wrappers import wrap_gemini
 from pydantic import BaseModel
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 from src.core.config import settings
@@ -37,25 +37,31 @@ class GeminiService:
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
         self.api_key = api_key or settings.gemini_api_key
         self.model = model or settings.gemini_model
+        self.use_vertex = settings.use_vertex_ai
+        # Only truly offline when there is neither a GCP project (Vertex AI, uses
+        # Application Default Credentials -- no key needed) nor an AI Studio key.
+        self._offline = not self.use_vertex and not self.api_key
         self._client: Optional[genai.Client] = None
 
     @property
     def client(self) -> genai.Client:
         if self._client is None:
-            if not self.api_key:
-                logger.warning("GEMINI_API_KEY is not set. Operating in offline/simulated mode.")
-            self._client = genai.Client(api_key=self.api_key or "DUMMY_KEY_FOR_INIT")
-            if settings.langsmith_api_key:
-                # Auto-traces every call with real latency + token usage, so LangSmith can
-                # compute cost per run -- without this, calls are invisible to LangSmith
-                # since they go through the raw SDK, not a LangChain chat model wrapper.
-                self._client = wrap_gemini(self._client)
+            if self.use_vertex:
+                self._client = genai.Client(
+                    vertexai=True,
+                    project=settings.google_cloud_project,
+                    location=settings.google_cloud_location,
+                )
+            else:
+                if self._offline:
+                    logger.warning("No GOOGLE_CLOUD_PROJECT or GEMINI_API_KEY set. Operating in offline/simulated mode.")
+                self._client = genai.Client(api_key=self.api_key or "DUMMY_KEY_FOR_INIT")
         return self._client
 
     async def generate_text(self, prompt: str, system_instruction: Optional[str] = None) -> str:
         """Generates text from Gemini model."""
-        if not self.api_key:
-            logger.info("Using simulated Gemini response (GEMINI_API_KEY unset).")
+        if self._offline:
+            logger.info("Using simulated Gemini response (no Vertex AI project or API key configured).")
             return f"[Simulated Gemini Output for prompt: {prompt[:80]}...]"
 
         try:
@@ -83,8 +89,8 @@ class GeminiService:
         """Generates a response constrained to response_schema's JSON shape, returning a parsed instance.
         Assumes response_schema's fields all have defaults (e.g. empty lists), since that's what's
         returned in offline/simulated mode when no API key is configured."""
-        if not self.api_key:
-            logger.info("Using simulated (empty) structured response (GEMINI_API_KEY unset).")
+        if self._offline:
+            logger.info("Using simulated (empty) structured response (no Vertex AI project or API key configured).")
             return response_schema()
 
         try:

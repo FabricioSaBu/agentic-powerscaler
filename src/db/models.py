@@ -264,6 +264,10 @@ class Matchup(Base):
         sa_enum(MatchupStatus), nullable=False, default=MatchupStatus.PENDING
     )
     error_message: Mapped[Optional[str]] = mapped_column(Text)
+    # Serialized PipelineState (team_a/team_b rosters, incl. traits/feats/research so far)
+    # for a run paused at the human-review gate. Lives here, not a separate checkpoint file,
+    # so it survives on whatever volume already correctly persists powerscaler.db.
+    pending_review_json: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False

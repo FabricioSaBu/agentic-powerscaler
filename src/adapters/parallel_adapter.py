@@ -6,7 +6,6 @@ https://docs.parallel.ai/
 
 from typing import List, Optional
 import httpx
-from langsmith import traceable
 from src.core.config import settings
 from src.core.logging import logger
 from src.core.progress import report
@@ -24,7 +23,6 @@ class ParallelAdapter:
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or settings.parallel_api_key
 
-    @traceable(run_type="tool", name="Parallel Search")
     async def search(self, request: ParallelSearchRequest) -> ParallelSearchResponse:
         """Executes a Parallel Search query to retrieve web context & feat references."""
         logger.info(f"Parallel Search API query: '{request.query}'")
@@ -69,7 +67,6 @@ class ParallelAdapter:
             logger.error(f"Parallel Search API call failed: {e}. Falling back to simulated response.")
             return self._mock_search(request.query)
 
-    @traceable(run_type="tool", name="Parallel Extract")
     async def extract(self, request: ParallelExtractRequest) -> ParallelExtractResponse:
         """Executes a Parallel Extract request to get full markdown text from web pages."""
         logger.info(f"Parallel Extract API for {len(request.urls)} URLs.")

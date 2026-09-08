@@ -27,6 +27,9 @@ _COLUMN_MIGRATIONS = {
         ("win_probability_b", "INTEGER"),
         ("tie_probability", "INTEGER"),
     ],
+    "matchups": [
+        ("pending_review_json", "TEXT"),
+    ],
 }
 
 

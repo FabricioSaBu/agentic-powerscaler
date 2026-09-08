@@ -45,10 +45,6 @@ async def startup_event():
     logger.info(f"Parallel Track Enabled: {settings.partner_track}")
     await init_db()
     logger.info(f"Database ready at {settings.database_url}")
-    # Paused human-review runs live in their own store: they are ephemeral machinery, not
-    # domain data, and keeping them out of powerscaler.db avoids the migration logic.
-    from src.api.v1.powerscaler import powerscaler_service
-    await powerscaler_service.attach_checkpointer("checkpoints.db")
 
 
 if __name__ == "__main__":

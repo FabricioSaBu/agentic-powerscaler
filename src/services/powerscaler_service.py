@@ -1,28 +1,44 @@
 """
 PowerScaler Orchestration Service.
-Coordinates Parallel Scout Agent, Profiler Agent, Analyst Agent, and Director Agent via
-a LangGraph state graph. Matchup lifecycle (row creation, status, commit/error handling)
-is owned here, outside the graph -- it's a persistence concern, not part of the agent flow.
+Coordinates Parallel Scout Agent, Profiler Agent, Analyst Agent, and Director Agent via a
+Google ADK agent tree. Matchup lifecycle (row creation, status, commit/error handling) is
+owned here, outside the agents -- it's a persistence concern, not part of the agent flow.
+
+The pipeline runs in two ADK invocations, bridged by our own DB rather than a framework
+checkpointer:
+  1. "research_and_review" -- Scout+Profiler (first pass) or Researcher-retry+Profiler
+     (any later round), for whichever contenders need it right now.
+  2. "analysis" -- Analyst, then Director if a cinematic script was requested.
+Between rounds of (1), a human-review run pauses: the paused PipelineState is persisted as
+JSON on the Matchup row (see Matchup.pending_review_json) and reloaded on the next /resume
+request, since an ADK Runner/Session is only alive for the one request that created it.
 """
 
-from datetime import datetime, timezone
 import json
 import uuid
+from datetime import datetime, timezone
+from typing import Any, Dict
+
+from google.adk.agents import BaseAgent as ADKBaseAgent
+from google.adk.agents.invocation_context import InvocationContext
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
+from pydantic import Field
 from sqlalchemy import select
-from langchain_core.runnables import RunnableConfig
-from langgraph.graph import StateGraph, END
-from langgraph.types import Command, interrupt
-from src.core.logging import logger
-from src.services.gemini_service import GeminiService
-from src.services.pipeline_state import PipelineState, research_label
-from src.adapters.parallel_adapter import ParallelAdapter
-from src.agents.scout_agent import ScoutAgent
-from src.agents.resolver_agent import ResolverAgent
-from src.agents.profiler_agent import ProfilerAgent
+from sqlalchemy.ext.asyncio import AsyncSession
+from typing_extensions import override
+
+from src.agents.adk_common import LegacyAgentStep
 from src.agents.analyst_agent import AnalystAgent
 from src.agents.director_agent import DirectorAgent, scenario_label
+from src.agents.profiler_agent import ProfilerAgent
 from src.agents.researcher_agent import ResearcherAgent, pending_member
-from langgraph.prebuilt import ToolNode
+from src.agents.resolver_agent import ResolverAgent
+from src.agents.scout_agent import ScoutAgent
+from src.adapters.parallel_adapter import ParallelAdapter
+from src.core.exceptions import PowerScalerException
+from src.core.logging import logger
 from src.db.models import (
     VALID_SCENARIOS,
     Character as DBCharacter,
@@ -39,10 +55,11 @@ from src.models.matchup import (
     CinematicShot,
     ContenderSpec,
     PowerScalerMatchupRequest,
-    PowerScalerReport
+    PowerScalerReport,
 )
-from src.core.exceptions import PowerScalerException
-from src.models.preview import MatchupResolution
+from src.models.preview import CharacterVersionOption, ItemOption, MatchupResolution
+from src.services.gemini_service import GeminiService
+from src.services.pipeline_state import research_label
 
 
 def _member_state(spec: ContenderSpec) -> dict:
@@ -101,10 +118,84 @@ def team_label(members: list) -> str:
     return " & ".join(m["name"] if isinstance(m, dict) else m.name for m in members)
 
 
+def _serialize_state(state: Dict[str, Any]) -> str:
+    """PipelineState -> JSON, for the pending_review_json column. version/chosen_items are
+    pydantic models (not plain-JSON); everything else in a member dict already is."""
+    def member_json(member: dict) -> dict:
+        out = dict(member)
+        if out.get("version") is not None:
+            out["version"] = out["version"].model_dump()
+        out["chosen_items"] = [item.model_dump() for item in out.get("chosen_items") or []]
+        return out
+
+    payload = dict(state)
+    payload["team_a"] = [member_json(m) for m in state.get("team_a", [])]
+    payload["team_b"] = [member_json(m) for m in state.get("team_b", [])]
+    return json.dumps(payload)
+
+
+def _deserialize_state(raw: str) -> Dict[str, Any]:
+    def member_obj(member: dict) -> dict:
+        out = dict(member)
+        if out.get("version") is not None:
+            out["version"] = CharacterVersionOption.model_validate(out["version"])
+        out["chosen_items"] = [ItemOption.model_validate(i) for i in out.get("chosen_items") or []]
+        return out
+
+    state = json.loads(raw)
+    state["team_a"] = [member_obj(m) for m in state.get("team_a", [])]
+    state["team_b"] = [member_obj(m) for m in state.get("team_b", [])]
+    return state
+
+
+class _ResearchAndReviewStage(ADKBaseAgent):
+    """One review round's research: the deterministic first pass (Scout+Profiler) when
+    nothing has been rejected yet, or the agentic retry (Researcher+Profiler) for whichever
+    contenders a human just rejected."""
+
+    scout: Any = Field(exclude=True)
+    profiler: Any = Field(exclude=True)
+    researcher: Any = Field(exclude=True)
+    db_session: Any = Field(exclude=True)
+    first_pass: bool = True
+
+    @override
+    async def _run_async_impl(self, ctx: InvocationContext):
+        if self.first_pass:
+            async for ev in self.scout.run_async(ctx):
+                yield ev
+        else:
+            context = ctx.session.state
+            while (target := pending_member(context)) is not None:
+                _side, _index, member = target
+                await self.researcher.research(member, self.db_session, context["matchup_id"])
+
+        async for ev in self.profiler.run_async(ctx):
+            yield ev
+
+
+class _AnalysisStage(ADKBaseAgent):
+    """Analyst, then Director if a cinematic script was requested. Owns the matchup's status
+    transitions for this half of the pipeline."""
+
+    analyst: Any = Field(exclude=True)
+    director: Any = Field(exclude=True)
+    matchup: Any = Field(exclude=True)
+
+    @override
+    async def _run_async_impl(self, ctx: InvocationContext):
+        self.matchup.status = DBMatchupStatus.SCALING
+        async for ev in self.analyst.run_async(ctx):
+            yield ev
+
+        if ctx.session.state.get("include_cinematic_script"):
+            self.matchup.status = DBMatchupStatus.SCRIPTING
+            async for ev in self.director.run_async(ctx):
+                yield ev
+
+
 class PowerScalerService:
-    def __init__(self, checkpointer=None):
-        # Supplied at app startup so a paused run outlives the request that created it.
-        self.checkpointer = checkpointer
+    def __init__(self):
         self.gemini_service = GeminiService()
         self.parallel_adapter = ParallelAdapter()
 
@@ -112,124 +203,17 @@ class PowerScalerService:
             gemini_service=self.gemini_service,
             parallel_adapter=self.parallel_adapter
         )
-        # Runs ahead of the graph (from /matchup/preview), not as a pipeline node: it exists
-        # to let the user confirm versions *before* the expensive research runs.
+        # Runs ahead of the ADK pipeline (from /matchup/preview), not as a pipeline stage: it
+        # exists to let the user confirm versions *before* the expensive research runs.
         self.resolver_agent = ResolverAgent(gemini_service=self.gemini_service)
         self.profiler_agent = ProfilerAgent(gemini_service=self.gemini_service)
         self.analyst_agent = AnalystAgent(gemini_service=self.gemini_service)
         self.director_agent = DirectorAgent(gemini_service=self.gemini_service)
         # Handles the retry path only: the model composes its own query instead of
         # replaying Scout's template.
-        self.researcher_agent = ResearcherAgent(parallel_adapter=self.parallel_adapter)
-
-        self.graph = self._build_graph()
-
-    async def attach_checkpointer(self, db_path: str) -> None:
-        """Called once at app startup. The saver holds an aiosqlite connection that must
-        outlive individual requests -- a paused run waits at the review gate across two
-        separate HTTP calls -- so it is created here rather than per request."""
-        import aiosqlite
-        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-
-        conn = await aiosqlite.connect(db_path)
-        self.checkpointer = AsyncSqliteSaver(conn)
-        await self.checkpointer.setup()
-        self.graph = self._build_graph()   # recompile so the graph actually uses it
-        logger.info(f"Human-review checkpointer ready at {db_path}")
-
-    def _build_graph(self):
-        """Scout -> Profiler -> Analyst -> (Director, if requested) -> END.
-        Session/matchup are per-request, so they travel via config["configurable"]
-        rather than graph state (which is meant to be the agents' shared data, not
-        request-scoped dependencies)."""
-
-        async def scout_node(state: PipelineState, config: RunnableConfig) -> dict:
-            return await self.scout_agent.process(state, config["configurable"]["session"])
-
-        async def profiler_node(state: PipelineState, config: RunnableConfig) -> dict:
-            return await self.profiler_agent.process(state, config["configurable"]["session"])
-
-        async def analyst_node(state: PipelineState, config: RunnableConfig) -> dict:
-            config["configurable"]["matchup"].status = DBMatchupStatus.SCALING
-            return await self.analyst_agent.process(state, config["configurable"]["session"])
-
-        async def director_node(state: PipelineState, config: RunnableConfig) -> dict:
-            config["configurable"]["matchup"].status = DBMatchupStatus.SCRIPTING
-            return await self.director_agent.process(state, config["configurable"]["session"])
-
-        async def review_node(state: PipelineState, config: RunnableConfig) -> dict:
-            """Pauses the run so a person can confirm each contender's data before the
-            verdict. Kept deliberately tiny: resuming re-executes the whole node, so any
-            expensive work here would be repeated on every approval."""
-            if not state.get("human_review"):
-                return {}   # JSON API path -- never pauses
-            rnd = state.get("review_round", 0)
-            if rnd >= MAX_REVIEW_ROUNDS:
-                return {}   # safety cap; the screen told the user this was the last round
-
-            team_a, team_b = state["team_a"], state["team_b"]
-            decision = interrupt({
-                "round": rnd,
-                "max_rounds": MAX_REVIEW_ROUNDS,
-                "team_a": [_review_card(m) for m in team_a],
-                "team_b": [_review_card(m) for m in team_b],
-            })
-
-            # decision: {"a": [{"approved": bool, "hint": str}, ...], "b": [...]}
-            for side, team in (("a", team_a), ("b", team_b)):
-                for index, member in enumerate(team):
-                    verdicts = (decision or {}).get(side) or []
-                    choice = verdicts[index] if index < len(verdicts) else {}
-                    if choice.get("approved", True):
-                        member["needs_research"] = False
-                        continue
-                    member["needs_research"] = True
-                    member["research_hint"] = (choice.get("hint") or "").strip()
-
-            return {"team_a": team_a, "team_b": team_b, "review_round": rnd + 1}
-
-        async def researcher_node(state: PipelineState, config: RunnableConfig) -> dict:
-            return await self.researcher_agent.think(state)
-
-        def route_after_review(state: PipelineState) -> str:
-            # Rejected contenders go to the agentic researcher, which picks its own query
-            # from the reviewer's note rather than re-running Scout's template.
-            return "researcher" if pending_member(state) else "analyst"
-
-        def route_after_researcher(state: PipelineState) -> str:
-            """ReAct loop: run the tool the model asked for, otherwise move on. The tool
-            clears needs_research, so once nothing is pending we go straight to profiling."""
-            messages = state.get("messages") or []
-            if messages and getattr(messages[-1], "tool_calls", None):
-                return "research_tools"
-            return "researcher" if pending_member(state) else "profiler"
-
-        def route_after_analyst(state: PipelineState) -> str:
-            return "director" if state.get("include_cinematic_script") else END
-
-        graph = StateGraph(PipelineState)
-        graph.add_node("scout", scout_node)
-        graph.add_node("profiler", profiler_node)
-        graph.add_node("review", review_node)
-        graph.add_node("researcher", researcher_node)
-        graph.add_node("research_tools", ToolNode([self.researcher_agent.search_tool]))
-        graph.add_node("analyst", analyst_node)
-        graph.add_node("director", director_node)
-
-        graph.set_entry_point("scout")
-        graph.add_edge("scout", "profiler")
-        graph.add_edge("profiler", "review")
-        # The cycle: rejected contenders go back through research with the user's hint.
-        graph.add_conditional_edges("review", route_after_review, {"researcher": "researcher", "analyst": "analyst"})
-        graph.add_conditional_edges("researcher", route_after_researcher, {
-            "research_tools": "research_tools", "researcher": "researcher", "profiler": "profiler",
-        })
-        # After a tool call the model sees the result and decides whether it is done.
-        graph.add_edge("research_tools", "researcher")
-        graph.add_conditional_edges("analyst", route_after_analyst, {"director": "director", END: END})
-        graph.add_edge("director", END)
-
-        return graph.compile(checkpointer=self.checkpointer)
+        self.researcher_agent = ResearcherAgent(
+            parallel_adapter=self.parallel_adapter, gemini_service=self.gemini_service
+        )
 
     async def resolve_versions(
         self,
@@ -313,51 +297,70 @@ class PowerScalerService:
         await session.commit()
         return scenes, False, label
 
-    async def _drive(self, payload, session, matchup, thread_id: str):
-        """Runs (or resumes) the graph, owning matchup status and commit/error handling.
-        Returns the graph state -- which carries __interrupt__ when it paused for review."""
+    async def _run_adk(self, root_agent: ADKBaseAgent, state: Dict[str, Any], thread_id: str) -> Dict[str, Any]:
+        """Runs one ADK invocation to completion and returns the final session state."""
+        session_service = InMemorySessionService()
+        await session_service.create_session(
+            app_name="powerscaler", user_id="powerscaler", session_id=thread_id, state=state
+        )
+        runner = Runner(agent=root_agent, app_name="powerscaler", session_service=session_service)
+        message = types.Content(role="user", parts=[types.Part(text="run")])
+        async for _event in runner.run_async(user_id="powerscaler", session_id=thread_id, new_message=message):
+            pass
+        final = await session_service.get_session(app_name="powerscaler", user_id="powerscaler", session_id=thread_id)
+        return final.state
+
+    def _research_review_stage(self, session: AsyncSession, first_pass: bool) -> _ResearchAndReviewStage:
+        return _ResearchAndReviewStage(
+            name="research_and_review",
+            scout=LegacyAgentStep(name="scout", legacy_agent=self.scout_agent, db_session=session),
+            profiler=LegacyAgentStep(name="profiler", legacy_agent=self.profiler_agent, db_session=session),
+            researcher=self.researcher_agent,
+            db_session=session,
+            first_pass=first_pass,
+        )
+
+    def _analysis_stage(self, session: AsyncSession, matchup: DBMatchup) -> _AnalysisStage:
+        return _AnalysisStage(
+            name="analysis",
+            analyst=LegacyAgentStep(name="analyst", legacy_agent=self.analyst_agent, db_session=session),
+            director=LegacyAgentStep(name="director", legacy_agent=self.director_agent, db_session=session),
+            matchup=matchup,
+        )
+
+    def _review_payload(self, state: Dict[str, Any], round_no: int) -> Dict[str, Any]:
+        return {
+            "round": round_no,
+            "max_rounds": MAX_REVIEW_ROUNDS,
+            "team_a": [_review_card(m) for m in state["team_a"]],
+            "team_b": [_review_card(m) for m in state["team_b"]],
+        }
+
+    def _build_report(self, matchup: DBMatchup, state: Dict[str, Any]) -> PowerScalerReport:
+        return PowerScalerReport(
+            report_id=matchup.report_id,
+            matchup=matchup.title,
+            timestamp=datetime.now(timezone.utc),
+            verdict=state["verdict"],
+            cinematic_battle_script=state.get("cinematic_battle_script"),
+            parallel_search_queries=state.get("parallel_search_queries", []),
+            sources_cited=state.get("sources_cited", []),
+        )
+
+    async def _finish_with_analysis(
+        self, state: Dict[str, Any], session: AsyncSession, matchup: DBMatchup, thread_id: str
+    ) -> PowerScalerReport:
         try:
-            state = await self.graph.ainvoke(
-                payload,
-                config={"configurable": {
-                    "thread_id": thread_id, "session": session, "matchup": matchup,
-                }},
-            )
-            if not state.get("__interrupt__"):
-                matchup.status = DBMatchupStatus.COMPLETED
+            state = await self._run_adk(self._analysis_stage(session, matchup), state, f"{thread_id}-analysis")
+            matchup.status = DBMatchupStatus.COMPLETED
+            matchup.pending_review_json = None
             await session.commit()
-            return state
         except Exception as e:
-            # Deliberately not rolling back: whatever research/profiles were already flushed
-            # (e.g. Scout succeeded but Analyst failed) are kept rather than discarded.
             matchup.status = DBMatchupStatus.FAILED
             matchup.error_message = str(e)
             await session.commit()
             raise
-
-    async def resume_review(self, thread_id: str, decision: dict, session):
-        """Continues a run paused at the review gate. The checkpointer holds the state; the
-        request-scoped session and matchup row have to be supplied fresh each time."""
-        matchup = (
-            await session.execute(select(DBMatchup).where(DBMatchup.report_id == thread_id))
-        ).scalar_one_or_none()
-        if matchup is None:
-            raise PowerScalerException("That run has expired -- start the matchup again.")
-
-        final_state = await self._drive(Command(resume=decision), session, matchup, thread_id)
-        if final_state.get("__interrupt__"):
-            return None, final_state["__interrupt__"][0].value, thread_id
-
-        report = PowerScalerReport(
-            report_id=matchup.report_id,
-            matchup=matchup.title,
-            timestamp=datetime.now(timezone.utc),
-            verdict=final_state["verdict"],
-            cinematic_battle_script=final_state.get("cinematic_battle_script"),
-            parallel_search_queries=final_state.get("parallel_search_queries", []),
-            sources_cited=final_state.get("sources_cited", []),
-        )
-        return report, None, thread_id
+        return self._build_report(matchup, state)
 
     async def run_matchup_pipeline(
         self, request: PowerScalerMatchupRequest, session, human_review: bool = False
@@ -385,32 +388,75 @@ class PowerScalerService:
         session.add(matchup)
         await session.flush()
 
-        initial_state: PipelineState = {
+        state: Dict[str, Any] = {
             "matchup_id": matchup.id,
             "battle_environment": request.battle_environment or "Neutral Multiversal Arena",
             "include_cinematic_script": request.include_cinematic_script,
             "team_a": [_member_state(m) for m in team_a],
             "team_b": [_member_state(m) for m in team_b],
-            "human_review": human_review,
-            "review_round": 0,
         }
 
-        thread_id = report_id
-        final_state = await self._drive(
-            initial_state, session, matchup, thread_id
-        )
-        if final_state.get("__interrupt__"):
-            return None, final_state["__interrupt__"][0].value, thread_id
+        try:
+            state = await self._run_adk(self._research_review_stage(session, first_pass=True), state, report_id)
+            await session.commit()
+        except Exception as e:
+            matchup.status = DBMatchupStatus.FAILED
+            matchup.error_message = str(e)
+            await session.commit()
+            raise
 
-        report = PowerScalerReport(
-            report_id=report_id,
-            matchup=title,
-            timestamp=datetime.now(timezone.utc),
-            verdict=final_state["verdict"],
-            cinematic_battle_script=final_state.get("cinematic_battle_script"),
-            parallel_search_queries=final_state.get("parallel_search_queries", []),
-            sources_cited=final_state.get("sources_cited", [])
-        )
+        if human_review:
+            matchup.pending_review_json = _serialize_state(state)
+            await session.commit()
+            return None, self._review_payload(state, round_no=0), report_id
 
+        report = await self._finish_with_analysis(state, session, matchup, report_id)
         logger.info(f"PowerScaler pipeline [{report_id}] successfully finished.")
-        return report, None, thread_id
+        return report, None, report_id
+
+    async def resume_review(self, thread_id: str, decision: dict, session):
+        """Continues a run paused at the review gate. The paused PipelineState lives on the
+        Matchup row (pending_review_json); the request-scoped session is supplied fresh."""
+        matchup = (
+            await session.execute(select(DBMatchup).where(DBMatchup.report_id == thread_id))
+        ).scalar_one_or_none()
+        if matchup is None or not matchup.pending_review_json:
+            raise PowerScalerException("That run has expired -- start the matchup again.")
+
+        state = _deserialize_state(matchup.pending_review_json)
+        round_no = state.get("review_round", 0)
+
+        for side, team in (("a", state["team_a"]), ("b", state["team_b"])):
+            for index, member in enumerate(team):
+                verdicts = (decision or {}).get(side) or []
+                choice = verdicts[index] if index < len(verdicts) else {}
+                if choice.get("approved", True):
+                    member["needs_research"] = False
+                else:
+                    member["needs_research"] = True
+                    member["research_hint"] = (choice.get("hint") or "").strip()
+
+        if pending_member(state) is None:
+            report = await self._finish_with_analysis(state, session, matchup, thread_id)
+            return report, None, thread_id
+
+        try:
+            state = await self._run_adk(
+                self._research_review_stage(session, first_pass=False), state, f"{thread_id}-r{round_no}"
+            )
+            await session.commit()
+        except Exception as e:
+            matchup.status = DBMatchupStatus.FAILED
+            matchup.error_message = str(e)
+            await session.commit()
+            raise
+
+        round_no += 1
+        if pending_member(state) is None or round_no >= MAX_REVIEW_ROUNDS:
+            report = await self._finish_with_analysis(state, session, matchup, thread_id)
+            return report, None, thread_id
+
+        state["review_round"] = round_no
+        matchup.pending_review_json = _serialize_state(state)
+        await session.commit()
+        return None, self._review_payload(state, round_no=round_no), thread_id
