@@ -139,6 +139,12 @@ class ResearcherAgent:
             model=Gemini(model=settings.gemini_model, client=self.gemini_service.client),
             instruction=_SYSTEM,
             tools=[FunctionTool(search_character_feats)],
+            # Composing one search query from a rejection hint, then a one-line wrap-up --
+            # no deliberation needed, and the reply is always short.
+            generate_content_config=types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_level="LOW"),
+                max_output_tokens=1024,
+            ),
         )
         session_service = InMemorySessionService()
         user_id, session_id = "powerscaler", f"research-{uuid.uuid4().hex[:8]}"

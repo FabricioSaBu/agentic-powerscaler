@@ -164,6 +164,10 @@ class DirectorAgent(BaseAgent):
             prompt=prompt,
             response_schema=ScriptOutline,
             system_instruction=_SYSTEM_INSTRUCTION,
+            # Creative composition across 2-3 scenes of several shots each benefits from
+            # some deliberation, and needs more room than a plain extraction call.
+            thinking_level="medium",
+            max_output_tokens=8192,
         )
 
         scenes = [s for s in outline.scenes if s.shots]

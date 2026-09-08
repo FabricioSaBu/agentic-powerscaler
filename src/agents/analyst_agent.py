@@ -302,7 +302,10 @@ class AnalystAgent(BaseAgent):
 
         analysis_text = await self.gemini_service.generate_text(
             prompt=prompt,
-            system_instruction=system_instruction
+            system_instruction=system_instruction,
+            # The one call that actually reasons about a matchup (weighing feats, speed
+            # tiers, hax counters against each other) -- give it real thinking budget.
+            thinking_level="high",
         )
 
         # Build structured domain verdict from the real, persisted profile data.
