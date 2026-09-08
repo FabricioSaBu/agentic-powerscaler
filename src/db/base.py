@@ -45,8 +45,20 @@ _TABLE_REBUILDS = {
 def _migrate(conn) -> None:
     from sqlalchemy import text
 
+    is_sqlite = conn.dialect.name == "sqlite"
+
     def columns_of(table: str) -> set:
-        return {row[1] for row in conn.execute(text(f'PRAGMA table_info("{table}")'))}
+        if is_sqlite:
+            return {row[1] for row in conn.execute(text(f'PRAGMA table_info("{table}")'))}
+        # Postgres: PRAGMA doesn't exist -- read the catalog instead. An empty set for a
+        # table that isn't there yet means the same thing as the SQLite branch above.
+        return {
+            row[0]
+            for row in conn.execute(
+                text("SELECT column_name FROM information_schema.columns WHERE table_name = :t"),
+                {"t": table},
+            )
+        }
 
     for table, columns in _COLUMN_MIGRATIONS.items():
         existing = columns_of(table)

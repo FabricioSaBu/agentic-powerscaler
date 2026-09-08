@@ -18,6 +18,9 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "sqlalchemy[asyncio]>=2.0.35",
     "aiosqlite>=0.20.0",
+    # Cloud SQL for PostgreSQL in production; aiosqlite above remains the local/offline
+    # dev default (DATABASE_URL picks the dialect, both drivers just need to be present).
+    "asyncpg>=0.29.0",
     # Google Cloud Agent Development Kit -- orchestrates the multi-agent pipeline (Scout,
     # Profiler, Researcher, Analyst, Director) via a Runner/Session agent tree.
     "google-adk>=1.0.0",
