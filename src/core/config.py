@@ -24,7 +24,9 @@ class Settings(BaseSettings):
     gemini_api_key: Optional[str] = None
     gemini_model: str = "gemini-2.5-flash"
     google_cloud_project: Optional[str] = None
-    google_cloud_location: str = "us-central1"
+    # "global" (not a region) is required for current-generation Gemini 3.x models on
+    # Vertex AI -- a regional endpoint like us-central1 404s even though the model exists.
+    google_cloud_location: str = "global"
 
     # Parallel API Track Configuration (https://docs.parallel.ai/)
     partner_track: str = "parallel"

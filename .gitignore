@@ -13,6 +13,11 @@ htmlcov/
 .env
 .env.local
 
+# GCP service account keys -- never commit these (this repo is public)
+*.json
+*:Zone.Identifier
+credentials/
+
 # IDE / Editor files
 .vscode/
 .idea/
