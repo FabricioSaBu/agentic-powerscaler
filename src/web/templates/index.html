@@ -278,6 +278,7 @@
     // could sit spinning long after its work finished -- honest labels, invented pacing.
     var runId = null;
     var pollTimer = null;
+    var lastRenderKey = null;
 
     function newRunId() {
       try { return crypto.randomUUID(); }
@@ -285,6 +286,14 @@
     }
 
     function renderSteps(steps, done) {
+      // Re-rendering unchanged content would replace the DOM nodes and restart their CSS
+      // animations (the fade-in and the spinner) on every single poll -- looking like the
+      // spinner stutters/flickers instead of spinning continuously. Skip the redraw
+      // entirely when nothing actually changed since the last poll.
+      var key = JSON.stringify(steps.map(function (s) { return s.message; })) + '|' + done;
+      if (key === lastRenderKey) return;
+      lastRenderKey = key;
+
       var list = document.getElementById('agent-steps');
       if (!steps.length) {
         list.innerHTML = '<li class="active"><span class="tick">\u27F3</span><span>Starting\u2026</span></li>';
@@ -305,6 +314,7 @@
 
     function startProgress() {
       stopProgress();
+      lastRenderKey = null;
       renderSteps([], false);
       pollTimer = setInterval(function () {
         if (!runId) return;

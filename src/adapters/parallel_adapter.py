@@ -70,7 +70,7 @@ class ParallelAdapter:
     async def extract(self, request: ParallelExtractRequest) -> ParallelExtractResponse:
         """Executes a Parallel Extract request to get full markdown text from web pages."""
         logger.info(f"Parallel Extract API for {len(request.urls)} URLs.")
-        report(f"Reading {len(request.urls)} source pages… (this is the slow part)")
+        report(f"Reading {len(request.urls)} source pages…")
         
         if not self.api_key:
             return self._mock_extract(request.urls)
