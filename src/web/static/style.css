@@ -692,9 +692,10 @@ html[data-theme="light"] .review-warn { color: #8a5d06; }
   font-size: 0.62rem; margin-left: 0.35rem;
   padding: 0.05rem 0.3rem; border-radius: 4px;
 }
-.conf-ok  { color: var(--emerald); background: rgba(52, 211, 153, 0.10); }
+.conf-high   { color: var(--emerald); background: rgba(52, 211, 153, 0.10); }
+.conf-medium { color: var(--cyan); background: rgba(6, 182, 212, 0.10); }
 /* Low confidence is the tell that a stat was inferred rather than sourced. */
-.conf-low { color: #fbbf24; background: rgba(251, 191, 36, 0.12); }
+.conf-low    { color: #fbbf24; background: rgba(251, 191, 36, 0.12); }
 html[data-theme="light"] .conf-low { color: #92650b; }
 .trail-sources li { padding: 0.14rem 0; word-break: break-all; }
 .trail-sources a { color: var(--text-dim); font-size: 0.7rem; }

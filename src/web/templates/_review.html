@@ -58,7 +58,8 @@
           <li>
             <code>{{ t.code }}</code> = <strong>{{ t.value_label }}</strong>
             {% if t.confidence is not none %}
-            <span class="conf conf-{{ 'low' if t.confidence < 0.6 else 'ok' }}">{{ '%.0f'|format(t.confidence * 100) }}%</span>
+            {% set band = 'low' if t.confidence < 0.4 else ('medium' if t.confidence < 0.8 else 'high') %}
+            <span class="conf conf-{{ band }}" title="{{ '%.0f'|format(t.confidence * 100) }}% confidence">{{ band|capitalize }}</span>
             {% endif %}
           </li>
           {% endfor %}
